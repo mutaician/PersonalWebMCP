@@ -25,8 +25,13 @@ function normalizeText(value: string | null | undefined, limit = 160): string | 
 
 function associatedLabel(element: Element): string | undefined {
   if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
-    const explicit = element.labels?.[0]?.textContent;
-    if (explicit) return normalizeText(explicit);
+    const explicit = element.labels?.[0];
+    if (explicit) {
+      const copy = explicit.cloneNode(true) as HTMLElement;
+      copy.querySelectorAll('input, select, textarea, button').forEach((control) => control.remove());
+      const text = normalizeText(copy.textContent)?.replace(/\s*:\s*$/, '');
+      if (text) return text;
+    }
   }
   const wrappingLabel = element.closest('label');
   return normalizeText(wrappingLabel?.textContent);
@@ -134,7 +139,7 @@ function expectedOutcome(element: Element, stepType: TraceStepType): string {
   return 'target-activated';
 }
 
-function semanticFingerprint(element: Element, stepType: TraceStepType): SemanticLocator {
+export function createSemanticLocator(element: Element, stepType: TraceStepType): SemanticLocator {
   const label = associatedLabel(element);
   const form = element.closest('form');
   const parentText = normalizeText(element.parentElement?.textContent, 180);
@@ -332,7 +337,7 @@ export class InteractionRecorder {
         steps[index] = {
           ...steps[index]!,
           occurredAt: new Date().toISOString(),
-          locator: semanticFingerprint(element, type),
+          locator: createSemanticLocator(element, type),
           value: capturedValue(element),
         };
         this.state = { ...this.state, trace: { ...this.state.trace, steps } };
@@ -346,7 +351,7 @@ export class InteractionRecorder {
       id: crypto.randomUUID(),
       type,
       occurredAt: new Date().toISOString(),
-      locator: semanticFingerprint(element, type),
+      locator: createSemanticLocator(element, type),
       value: capturedValue(element),
     };
     this.valueStepByElement.set(element, step.id);
@@ -364,7 +369,7 @@ export class InteractionRecorder {
       id: crypto.randomUUID(),
       type: 'ACTIVATE',
       occurredAt: new Date().toISOString(),
-      locator: semanticFingerprint(element, 'ACTIVATE'),
+      locator: createSemanticLocator(element, 'ACTIVATE'),
     }, element);
   }
 
@@ -377,7 +382,7 @@ export class InteractionRecorder {
       id: crypto.randomUUID(),
       type: 'SUBMIT',
       occurredAt: new Date().toISOString(),
-      locator: semanticFingerprint(submitter, 'SUBMIT'),
+      locator: createSemanticLocator(submitter, 'SUBMIT'),
     }, submitter);
   }
 

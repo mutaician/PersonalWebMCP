@@ -5,12 +5,14 @@ import {
   createEmptyRegistryState,
   type ExtensionSettings,
   type PersonalToolRecord,
+  type RepairProposal,
   type SettingsState,
   type ToolRegistryState,
 } from '@personal-webmcp/contracts';
 
 const REGISTRY_KEY = 'personalWebMcp.registry';
 const SETTINGS_KEY = 'personalWebMcp.settings';
+const REPAIRS_KEY = 'personalWebMcp.repairs';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -151,5 +153,32 @@ export class SettingsRepository {
     const next = { ...current, ...patch };
     await this.save(next);
     return next;
+  }
+}
+
+export class RepairRepository {
+  async list(): Promise<RepairProposal[]> {
+    const stored = await readLocalValue(REPAIRS_KEY);
+    if (!isRecord(stored)) return [];
+    return Object.values(stored)
+      .filter((proposal): proposal is RepairProposal => isRecord(proposal) && typeof proposal.id === 'string')
+      .map((proposal) => structuredClone(proposal))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async get(proposalId: string): Promise<RepairProposal | undefined> {
+    return (await this.list()).find((proposal) => proposal.id === proposalId);
+  }
+
+  async save(proposal: RepairProposal): Promise<void> {
+    const current = Object.fromEntries((await this.list()).map((item) => [item.id, item]));
+    current[proposal.id] = structuredClone(proposal);
+    await browser.storage.local.set({ [REPAIRS_KEY]: current });
+  }
+
+  async remove(proposalId: string): Promise<void> {
+    const current = Object.fromEntries((await this.list()).map((item) => [item.id, item]));
+    delete current[proposalId];
+    await browser.storage.local.set({ [REPAIRS_KEY]: current });
   }
 }

@@ -2,10 +2,13 @@ import type {
   ActiveTabSnapshot,
   ActivityReceipt,
   JsonValue,
+  LocatorRepair,
   PersonalToolExecutionResult,
   PersonalToolRegistration,
   PersonalToolRecord,
   PingResultPayload,
+  RepairProposal,
+  SemanticLocator,
   TabCapabilityStatus,
   TeachSessionSnapshot,
   ToolCatalogPayload,
@@ -21,6 +24,7 @@ import {
   activityReceiptRepository,
   bootstrapPersistence,
   getPersistenceSummary,
+  repairRepository,
   savePingReceipt,
   settingsRepository,
   toolRegistryRepository,
@@ -45,12 +49,30 @@ type ExtensionMessage =
   | { type: 'GET_SCOPED_PERSONAL_TOOLS'; url: string; supported: boolean }
   | { type: 'RUN_PERSONAL_TOOL'; toolId: string; input: Record<string, JsonValue>; invocationId?: string }
   | { type: 'CANCEL_PERSONAL_TOOL'; invocationId: string }
+  | { type: 'APPROVE_REPAIR'; proposalId: string; candidateIndex: number }
+  | { type: 'REJECT_REPAIR'; proposalId: string }
+  | { type: 'START_GUIDED_REPAIR'; proposalId: string }
+  | { type: 'GUIDED_REPAIR_SELECTED'; toolId: string; nodeId: string; locator: SemanticLocator }
+  | { type: 'RESTORE_TOOL_REVISION'; revisionId: string }
+  | { type: 'RETEST_PERSONAL_TOOL'; toolId: string }
   | { type: 'GET_ACTIVE_STATUS' }
   | { type: 'GET_PANEL_SNAPSHOT' }
   | { type: 'RUN_PING_SELF_TEST' }
   | { type: 'ENABLE_ORIGIN'; origin: string }
   | { type: 'GET_PERSISTENCE_SUMMARY' }
   | { type: 'CLEAR_ACTIVITY_HISTORY' };
+
+interface ToolWorkflowResponse {
+  ok: boolean;
+  result?: PersonalToolExecutionResult;
+  error?: string;
+  repair?: {
+    nodeId: string;
+    nodeLabel: string;
+    originalLocator: SemanticLocator;
+    candidates: RepairProposal['candidates'];
+  };
+}
 
 function getUrl(url: string | undefined): URL | undefined {
   try {
@@ -212,17 +234,24 @@ export default defineBackground(() => {
     const url = getUrl(status.url || tab?.url);
     const origin = url?.origin;
     const pattern = origin ? getOriginPattern(origin) : undefined;
-    const [personalTools, receipts, enabled] = await Promise.all([
+    const [personalTools, receipts, repairs, enabled] = await Promise.all([
       toolRegistryRepository.list(),
       activityReceiptRepository.list(),
+      repairRepository.list(),
       pattern ? browser.permissions.contains({ origins: [pattern] }) : Promise.resolve(false),
     ]);
+    const scopedTools = personalTools.filter((tool) => !origin || tool.scope.origin === origin);
+    const revisions = (await Promise.all(scopedTools.map((tool) => revisionRepository.listForTool(tool.id))))
+      .flat()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
     return {
       status,
       catalog,
-      personalTools: personalTools.filter((tool) => !origin || tool.scope.origin === origin),
+      personalTools: scopedTools,
       receipts: receipts.filter((receipt) => !origin || receipt.origin === origin).slice(0, 25),
+      repairs: repairs.filter((proposal) => scopedTools.some((tool) => tool.id === proposal.toolId)),
+      revisions,
       teachSession: tab?.id === undefined
         ? createIdleTeachSession()
         : teachSessionByTab.get(tab.id) ?? createIdleTeachSession(),
@@ -235,6 +264,52 @@ export default defineBackground(() => {
 
   const publishExecutionState = async () => {
     await browser.runtime.sendMessage({ type: 'TOOL_EXECUTION_CHANGED' }).catch(() => undefined);
+  };
+
+  const publishRepairState = async () => {
+    await browser.runtime.sendMessage({ type: 'REPAIR_STATE_CHANGED' }).catch(() => undefined);
+  };
+
+  const applyLocatorRepairs = async (
+    tool: PersonalToolRecord,
+    repairs: LocatorRepair[],
+    reason: 'AUTO_REPAIR' | 'APPROVED_REPAIR',
+    repairIds: string[] = repairs.map(() => crypto.randomUUID()),
+  ): Promise<PersonalToolRecord> => {
+    const now = new Date().toISOString();
+    const repairByNode = new Map(repairs.map((repair) => [repair.nodeId, repair]));
+    const updated: PersonalToolRecord = {
+      ...tool,
+      version: tool.version + 1,
+      workflowGraph: {
+        ...tool.workflowGraph,
+        nodes: tool.workflowGraph.nodes.map((node) => {
+          const repair = repairByNode.get(node.id);
+          return repair ? { ...node, config: { ...node.config, locator: repair.nextLocator as unknown as JsonValue } } : node;
+        }),
+      },
+      provenance: {
+        ...tool.provenance,
+        type: 'REPAIRED',
+        repairHistory: [...tool.provenance.repairHistory, ...repairIds],
+      },
+      health: { state: 'HEALTHY', lastVerifiedAt: now, confidence: Math.min(...repairs.map((repair) => repair.score)) },
+      updatedAt: now,
+    };
+    await toolRegistryRepository.save(updated);
+    await revisionRepository.save({
+      id: crypto.randomUUID(),
+      toolId: updated.id,
+      toolVersion: updated.version,
+      createdAt: now,
+      reason,
+      snapshot: structuredClone(updated),
+    });
+    for (const proposal of await repairRepository.list()) {
+      if (proposal.toolId === tool.id && repairByNode.has(proposal.nodeId)) await repairRepository.remove(proposal.id);
+    }
+    await publishRepairState();
+    return updated;
   };
 
   const runPersonalTool = async (
@@ -273,18 +348,46 @@ export default defineBackground(() => {
     await publishExecutionState();
 
     try {
-      const result = await browser.tabs.sendMessage(tab.id, {
+      const response = await browser.tabs.sendMessage(tab.id, {
         type: 'EXECUTE_TOOL_WORKFLOW',
         tool,
         input,
         invocationId,
-      }) as PersonalToolExecutionResult;
+      }) as ToolWorkflowResponse;
+      if (!response.ok || !response.result) {
+        if (response.repair) {
+          const proposal: RepairProposal = {
+            id: crypto.randomUUID(),
+            toolId: tool.id,
+            toolTitle: tool.title,
+            nodeId: response.repair.nodeId,
+            nodeLabel: response.repair.nodeLabel,
+            status: response.repair.candidates.length > 0 ? 'AWAITING_APPROVAL' : 'GUIDED_REQUIRED',
+            createdAt: new Date().toISOString(),
+            originalLocator: response.repair.originalLocator,
+            candidates: response.repair.candidates,
+            error: response.error || 'The target could not be resolved safely.',
+          };
+          await repairRepository.save(proposal);
+          await toolRegistryRepository.save({
+            ...tool,
+            health: { state: proposal.status === 'GUIDED_REQUIRED' ? 'BROKEN' : 'NEEDS_REVIEW' },
+            updatedAt: proposal.createdAt,
+          });
+          await publishRepairState();
+        }
+        throw new Error(response.error || 'Visible workflow execution failed.');
+      }
+      const result = response.result;
+      const executedTool = result.repairs.length > 0
+        ? await applyLocatorRepairs(tool, result.repairs, 'AUTO_REPAIR')
+        : tool;
       const finishedAtMs = Date.now();
       const finishedAt = new Date(finishedAtMs).toISOString();
       const receipt: ActivityReceipt = {
         id: crypto.randomUUID(),
         toolId: tool.id,
-        toolVersion: tool.version,
+        toolVersion: executedTool.version,
         origin: url.origin,
         startedAt,
         finishedAt,
@@ -298,8 +401,14 @@ export default defineBackground(() => {
       const settings = await settingsRepository.get();
       await activityReceiptRepository.save(receipt, settings.receiptLimit);
       await toolRegistryRepository.save({
-        ...tool,
-        health: { state: 'HEALTHY', lastVerifiedAt: finishedAt, confidence: 100 },
+        ...executedTool,
+        health: {
+          state: 'HEALTHY',
+          lastVerifiedAt: finishedAt,
+          confidence: result.repairs.length > 0
+            ? Math.min(...result.repairs.map((repair) => repair.score))
+            : 100,
+        },
         updatedAt: finishedAt,
       });
       executionByTab.set(tab.id, {
@@ -426,6 +535,115 @@ export default defineBackground(() => {
         invocationId: message.invocationId,
       });
       return { accepted: true };
+    }
+
+    if (message.type === 'APPROVE_REPAIR') {
+      await persistenceReady;
+      const proposal = await repairRepository.get(message.proposalId);
+      const candidate = proposal?.candidates[message.candidateIndex];
+      if (!proposal || !candidate) throw new Error('The repair candidate is no longer available.');
+      const tool = await toolRegistryRepository.get(proposal.toolId);
+      if (!tool) throw new Error('The tool for this repair no longer exists.');
+      const updated = await applyLocatorRepairs(tool, [{
+        nodeId: proposal.nodeId,
+        previousLocator: proposal.originalLocator,
+        nextLocator: candidate.locator,
+        score: candidate.score,
+        evidence: candidate.evidence,
+      }], 'APPROVED_REPAIR', [proposal.id]);
+      const activeTab = await getActiveTab();
+      if (activeTab?.id !== undefined) void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+      return { approved: true, toolVersion: updated.version };
+    }
+
+    if (message.type === 'REJECT_REPAIR') {
+      await persistenceReady;
+      const proposal = await repairRepository.get(message.proposalId);
+      if (!proposal) throw new Error('The repair proposal is no longer available.');
+      await repairRepository.save({ ...proposal, status: 'REJECTED' });
+      const tool = await toolRegistryRepository.get(proposal.toolId);
+      if (tool) await toolRegistryRepository.save({ ...tool, health: { state: 'BROKEN' }, updatedAt: new Date().toISOString() });
+      await publishRepairState();
+      return { rejected: true };
+    }
+
+    if (message.type === 'START_GUIDED_REPAIR') {
+      await persistenceReady;
+      const proposal = await repairRepository.get(message.proposalId);
+      const activeTab = await getActiveTab();
+      if (!proposal || activeTab?.id === undefined) throw new Error('Open the affected page before selecting a replacement.');
+      return browser.tabs.sendMessage(activeTab.id, {
+        type: 'START_GUIDED_REPAIR',
+        toolId: proposal.toolId,
+        nodeId: proposal.nodeId,
+      });
+    }
+
+    if (message.type === 'GUIDED_REPAIR_SELECTED') {
+      await persistenceReady;
+      const proposal = (await repairRepository.list()).find((item) => item.toolId === message.toolId && item.nodeId === message.nodeId);
+      const tool = await toolRegistryRepository.get(message.toolId);
+      if (!proposal || !tool) throw new Error('The guided repair session has expired.');
+      const updated = await applyLocatorRepairs(tool, [{
+        nodeId: message.nodeId,
+        previousLocator: proposal.originalLocator,
+        nextLocator: message.locator,
+        score: 100,
+        evidence: [{ category: 'CONTEXT', points: 0, detail: 'Replacement selected directly by the user.' }],
+      }], 'APPROVED_REPAIR', [proposal.id]);
+      if (sender.tab?.id !== undefined) void browser.tabs.sendMessage(sender.tab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+      return { repaired: true, toolVersion: updated.version };
+    }
+
+    if (message.type === 'RESTORE_TOOL_REVISION') {
+      await persistenceReady;
+      const revision = await revisionRepository.get(message.revisionId);
+      if (!revision) throw new Error('That revision no longer exists.');
+      const current = await toolRegistryRepository.get(revision.toolId);
+      if (!current) throw new Error('The tool for that revision no longer exists.');
+      const now = new Date().toISOString();
+      const restored: PersonalToolRecord = {
+        ...structuredClone(revision.snapshot),
+        version: current.version + 1,
+        provenance: {
+          ...revision.snapshot.provenance,
+          type: 'REPAIRED',
+          repairHistory: [...current.provenance.repairHistory, `restore:${revision.id}`],
+        },
+        health: { state: 'UNVERIFIED' },
+        updatedAt: now,
+      };
+      await toolRegistryRepository.save(restored);
+      await revisionRepository.save({
+        id: crypto.randomUUID(),
+        toolId: restored.id,
+        toolVersion: restored.version,
+        createdAt: now,
+        reason: 'RESTORED',
+        snapshot: structuredClone(restored),
+      });
+      for (const proposal of await repairRepository.list()) {
+        if (proposal.toolId === restored.id) await repairRepository.remove(proposal.id);
+      }
+      const activeTab = await getActiveTab();
+      if (activeTab?.id !== undefined) void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+      await publishRepairState();
+      return { restored: true, toolVersion: restored.version };
+    }
+
+    if (message.type === 'RETEST_PERSONAL_TOOL') {
+      await persistenceReady;
+      const tab = await getActiveTab();
+      const tool = await toolRegistryRepository.get(message.toolId);
+      if (!tab || !tool) throw new Error('Open the tool’s scoped page before retesting.');
+      const previousInput = (await activityReceiptRepository.listForTool(tool.id)).find((receipt) => receipt.inputSummary)?.inputSummary;
+      const properties = tool.inputSchema.properties && typeof tool.inputSchema.properties === 'object' && !Array.isArray(tool.inputSchema.properties)
+        ? tool.inputSchema.properties as Record<string, Record<string, unknown>>
+        : {};
+      const defaults = Object.fromEntries(Object.entries(properties)
+        .filter((entry) => entry[1] && typeof entry[1] === 'object' && 'default' in entry[1])
+        .map(([name, schema]) => [name, schema.default as JsonValue]));
+      return runPersonalTool(tab, tool.id, previousInput ?? defaults);
     }
 
     if (['START_TEACHING', 'PAUSE_TEACHING', 'RESUME_TEACHING', 'CANCEL_TEACHING', 'FINISH_TEACHING'].includes(message.type)) {

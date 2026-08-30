@@ -5,9 +5,11 @@ import type {
   DiscoveredWebMcpTool,
   JsonValue,
   PersonalToolRecord,
+  RepairProposal,
   TabCapabilityStatus,
   ToolCatalogPayload,
   ToolExecutionState,
+  ToolRevision,
 } from '@personal-webmcp/contracts';
 import { createIdleTeachSession } from '@personal-webmcp/contracts';
 import { TeachPanel } from './teach-panel';
@@ -42,6 +44,8 @@ const emptySnapshot: ActiveTabSnapshot = {
   catalog: emptyCatalog,
   personalTools: [],
   receipts: [],
+  repairs: [],
+  revisions: [],
   teachSession: createIdleTeachSession(),
   enabled: false,
 };
@@ -214,6 +218,50 @@ function ReceiptRow({ receipt }: { receipt: ActivityReceipt }) {
   );
 }
 
+function RepairProposalCard({
+  proposal,
+  onApprove,
+  onReject,
+  onGuide,
+}: {
+  proposal: RepairProposal;
+  onApprove: (proposalId: string, candidateIndex: number) => Promise<void>;
+  onReject: (proposalId: string) => Promise<void>;
+  onGuide: (proposalId: string) => Promise<void>;
+}) {
+  return (
+    <article className="repair-card">
+      <div className="repair-card-heading">
+        <span className={`repair-state ${proposal.status.toLowerCase()}`}>{proposal.status.replaceAll('_', ' ')}</span>
+        <div><strong>{proposal.toolTitle}</strong><p>{proposal.nodeLabel}</p></div>
+      </div>
+      <p>{proposal.error}</p>
+      {proposal.status === 'AWAITING_APPROVAL' && proposal.candidates.map((candidate, index) => (
+        <div className="repair-candidate" key={`${proposal.id}:${index}`}>
+          <div><strong>{candidate.preview}</strong><span>{candidate.score}/100 confidence</span></div>
+          <ul>{candidate.evidence.map((item) => <li key={item.category}>{item.points > 0 ? `+${item.points}` : 'USER'} · {item.detail}</li>)}</ul>
+          <button type="button" onClick={() => void onApprove(proposal.id, index)}>Approve this target</button>
+        </div>
+      ))}
+      <div className="repair-actions">
+        {proposal.status === 'AWAITING_APPROVAL' && <button type="button" onClick={() => void onReject(proposal.id)}>Reject all</button>}
+        {(proposal.status === 'GUIDED_REQUIRED' || proposal.status === 'REJECTED') && (
+          <button className="primary-button" type="button" onClick={() => void onGuide(proposal.id)}>Select replacement on page</button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function RevisionRow({ revision, currentVersion, onRestore }: { revision: ToolRevision; currentVersion: number; onRestore: (revisionId: string) => Promise<void> }) {
+  return (
+    <article className="revision-row">
+      <div><strong>Version {revision.toolVersion}</strong><span>{revision.reason.replaceAll('_', ' ')} · {new Date(revision.createdAt).toLocaleString()}</span></div>
+      <button type="button" onClick={() => void onRestore(revision.id)} disabled={revision.toolVersion === currentVersion}>Restore</button>
+    </article>
+  );
+}
+
 export default function App() {
   const [section, setSection] = useState<PanelSection>('overview');
   const [snapshot, setSnapshot] = useState<ActiveTabSnapshot>(emptySnapshot);
@@ -233,7 +281,7 @@ export default function App() {
     void refresh();
     const intervalId = window.setInterval(() => void refresh(), 1500);
     const onMessage = (message: { type?: string }) => {
-      if (['WEBMCP_STATUS', 'WEBMCP_CATALOG', 'TEACH_STATE_CHANGED', 'TOOL_EXECUTION_CHANGED', 'PERSONAL_TOOLS_CHANGED'].includes(message.type ?? '')) void refresh();
+      if (['WEBMCP_STATUS', 'WEBMCP_CATALOG', 'TEACH_STATE_CHANGED', 'TOOL_EXECUTION_CHANGED', 'PERSONAL_TOOLS_CHANGED', 'REPAIR_STATE_CHANGED'].includes(message.type ?? '')) void refresh();
     };
     browser.runtime.onMessage.addListener(onMessage);
     return () => {
@@ -283,6 +331,28 @@ export default function App() {
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not delete the personal tool.');
     }
+  };
+
+  const runRepairAction = async (message: Record<string, unknown>) => {
+    setBusy(true);
+    setActionError('');
+    try {
+      await browser.runtime.sendMessage(message);
+      await refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'The repair action failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approveRepair = (proposalId: string, candidateIndex: number) => runRepairAction({ type: 'APPROVE_REPAIR', proposalId, candidateIndex });
+  const rejectRepair = (proposalId: string) => runRepairAction({ type: 'REJECT_REPAIR', proposalId });
+  const startGuidedRepair = (proposalId: string) => runRepairAction({ type: 'START_GUIDED_REPAIR', proposalId });
+  const retestTool = (toolId: string) => runRepairAction({ type: 'RETEST_PERSONAL_TOOL', toolId });
+  const restoreRevision = async (revisionId: string) => {
+    if (!window.confirm('Restore this workflow revision as a new current version?')) return;
+    await runRepairAction({ type: 'RESTORE_TOOL_REVISION', revisionId });
   };
 
   const runSelfTest = async () => {
@@ -506,16 +576,34 @@ export default function App() {
       {section === 'repair' && (
         <section className="section-block flush">
           <div className="section-heading">
-            <div><p className="overline">HEALTH</p><h2>Capability repair</h2></div>
+            <div><p className="overline">SEMANTIC REPAIR</p><h2>Review and recover</h2></div>
           </div>
+          {snapshot.repairs.length > 0 ? snapshot.repairs.map((proposal) => (
+            <RepairProposalCard
+              proposal={proposal}
+              onApprove={approveRepair}
+              onReject={rejectRepair}
+              onGuide={startGuidedRepair}
+              key={proposal.id}
+            />
+          )) : <p className="empty-copy">No repair decisions are waiting. Failed targets appear here instead of being guessed.</p>}
+
+          <div className="section-heading divided"><div><p className="overline">HEALTH</p><h2>Saved capabilities</h2></div></div>
           {personalTools.map((tool) => (
             <article className="health-row" key={tool.id}>
               <span className={`health-dot ${tool.health.state.toLowerCase()}`} />
               <div><strong>{tool.title}</strong><p>{tool.health.state.replaceAll('_', ' ')}</p></div>
-              <span>{tool.health.confidence ?? '—'}{tool.health.confidence !== undefined ? '%' : ''}</span>
+              <div className="health-actions"><span>{tool.health.confidence ?? '—'}{tool.health.confidence !== undefined ? '%' : ''}</span><button type="button" onClick={() => void retestTool(tool.id)} disabled={busy || tool.health.state === 'BROKEN'}>Retest</button></div>
             </article>
           ))}
-          <p className="hint">Repair proposals and revision restore controls arrive with semantic execution in Step 9.</p>
+
+          <div className="section-heading divided"><div><p className="overline">VERSIONS</p><h2>Revision history</h2></div></div>
+          {personalTools.flatMap((tool) => snapshot.revisions
+            .filter((revision) => revision.toolId === tool.id)
+            .slice(0, 5)
+            .map((revision) => <RevisionRow revision={revision} currentVersion={tool.version} onRestore={restoreRevision} key={revision.id} />))}
+          {snapshot.revisions.length === 0 && <p className="empty-copy">Saved and repaired versions will appear here.</p>}
+          <p className="hint">High-confidence matches repair automatically after their postcondition passes. Ambiguous or missing targets always stop for you.</p>
         </section>
       )}
 

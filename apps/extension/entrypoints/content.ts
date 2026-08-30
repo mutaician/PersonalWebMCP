@@ -9,14 +9,19 @@ import {
   type PersonalToolInvocationResultPayload,
   type PersonalToolRecord,
   type PersonalToolRegistration,
+  type SemanticLocator,
   type PingResultPayload,
   type TabCapabilityStatus,
   type TeachSessionSnapshot,
   type ToolCatalogPayload,
   type WebMcpStatusPayload,
 } from '@personal-webmcp/contracts';
-import { executePersonalToolOnPage } from '../lib/execution/dom-executor';
-import { InteractionRecorder } from '../lib/teaching/recorder';
+import {
+  executePersonalToolOnPage,
+  RepairRequiredError,
+  type RepairRequest,
+} from '../lib/execution/dom-executor';
+import { createSemanticLocator, InteractionRecorder } from '../lib/teaching/recorder';
 
 type ContentMessage =
   | { type: 'GET_STATUS' }
@@ -30,8 +35,17 @@ type ContentMessage =
   | { type: 'SYNC_PERSONAL_TOOLS' }
   | { type: 'EXECUTE_TOOL_WORKFLOW'; tool: PersonalToolRecord; input: Record<string, JsonValue>; invocationId: string }
   | { type: 'CANCEL_TOOL_WORKFLOW'; invocationId: string }
+  | { type: 'START_GUIDED_REPAIR'; toolId: string; nodeId: string }
+  | { type: 'CANCEL_GUIDED_REPAIR' }
   | { type: 'REFRESH_CATALOG' }
   | { type: 'RUN_PING_SELF_TEST' };
+
+interface ToolWorkflowResponse {
+  ok: boolean;
+  result?: PersonalToolExecutionResult;
+  error?: string;
+  repair?: RepairRequest;
+}
 
 export default defineContentScript({
   matches: ['http://localhost:3000/*'],
@@ -53,6 +67,7 @@ export default defineContentScript({
     };
     let currentUrl = window.location.href;
     const activeExecutions = new Map<string, AbortController>();
+    let stopGuidedSelection: () => void = () => undefined;
     const recorder = new InteractionRecorder((snapshot) => {
       void browser.runtime.sendMessage({ type: 'TEACH_STATE_UPDATED', payload: snapshot }).catch(() => undefined);
     });
@@ -190,17 +205,87 @@ export default defineContentScript({
         const controller = new AbortController();
         activeExecutions.get(message.invocationId)?.abort();
         activeExecutions.set(message.invocationId, controller);
-        return executePersonalToolOnPage(
-          message.tool,
-          message.input,
-          message.invocationId,
-          controller.signal,
-        ).finally(() => activeExecutions.delete(message.invocationId));
+        return (async (): Promise<ToolWorkflowResponse> => {
+          try {
+            const result = await executePersonalToolOnPage(
+              message.tool,
+              message.input,
+              message.invocationId,
+              controller.signal,
+            );
+            return { ok: true, result };
+          } catch (error) {
+            return {
+              ok: false,
+              error: error instanceof Error ? error.message : 'Visible workflow execution failed.',
+              repair: error instanceof RepairRequiredError ? error.request : undefined,
+            };
+          } finally {
+            activeExecutions.delete(message.invocationId);
+          }
+        })();
       }
       if (message.type === 'CANCEL_TOOL_WORKFLOW') {
         const controller = activeExecutions.get(message.invocationId);
         controller?.abort(new DOMException('Tool execution was cancelled.', 'AbortError'));
         return Promise.resolve({ accepted: Boolean(controller) });
+      }
+      if (message.type === 'START_GUIDED_REPAIR') {
+        stopGuidedSelection();
+        let highlighted: HTMLElement | undefined;
+        const restoreHighlight = () => {
+          if (!highlighted) return;
+          highlighted.style.removeProperty('outline');
+          highlighted.style.removeProperty('outline-offset');
+          highlighted = undefined;
+        };
+        const cleanup = () => {
+          restoreHighlight();
+          document.removeEventListener('pointerover', onPointerOver, true);
+          document.removeEventListener('click', onSelect, true);
+          document.removeEventListener('keydown', onKeyDown, true);
+          stopGuidedSelection = () => undefined;
+        };
+        const onPointerOver = (event: Event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLElement)) return;
+          restoreHighlight();
+          highlighted = target;
+          target.style.outline = '3px solid #d45f2a';
+          target.style.outlineOffset = '2px';
+        };
+        const onSelect = (event: Event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const actionable = target.closest('button, a, input, select, textarea, [role], tr') ?? target;
+          const stepType = actionable instanceof HTMLSelectElement
+            ? 'SELECT'
+            : actionable instanceof HTMLInputElement || actionable instanceof HTMLTextAreaElement
+              ? 'INPUT'
+              : 'ACTIVATE';
+          const locator: SemanticLocator = createSemanticLocator(actionable, stepType);
+          cleanup();
+          void browser.runtime.sendMessage({
+            type: 'GUIDED_REPAIR_SELECTED',
+            toolId: message.toolId,
+            nodeId: message.nodeId,
+            locator,
+          }).catch(() => undefined);
+        };
+        const onKeyDown = (event: Event) => {
+          if (event instanceof KeyboardEvent && event.key === 'Escape') cleanup();
+        };
+        document.addEventListener('pointerover', onPointerOver, true);
+        document.addEventListener('click', onSelect, true);
+        document.addEventListener('keydown', onKeyDown, true);
+        stopGuidedSelection = cleanup;
+        return Promise.resolve({ accepted: true });
+      }
+      if (message.type === 'CANCEL_GUIDED_REPAIR') {
+        stopGuidedSelection();
+        return Promise.resolve({ accepted: true });
       }
       if (message.type === 'REFRESH_CATALOG') {
         postCommand('REFRESH_CATALOG');
@@ -217,6 +302,7 @@ export default defineContentScript({
       window.clearInterval(navigationTimer);
       for (const controller of activeExecutions.values()) controller.abort();
       activeExecutions.clear();
+      stopGuidedSelection();
       recorder.dispose();
       postCommand('WITHDRAW_PING');
     }, { once: true });

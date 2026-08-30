@@ -6,6 +6,7 @@ import {
 } from './indexed-database';
 import {
   SettingsRepository,
+  RepairRepository,
   ToolRegistryRepository,
 } from './local-repositories';
 import {
@@ -20,6 +21,7 @@ import {
 
 export const toolRegistryRepository = new ToolRegistryRepository();
 export const settingsRepository = new SettingsRepository();
+export const repairRepository = new RepairRepository();
 export const traceRepository = new TraceRepository();
 export const revisionRepository = new RevisionRepository();
 export const activityReceiptRepository = new ActivityReceiptRepository();

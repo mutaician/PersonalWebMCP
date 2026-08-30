@@ -174,6 +174,42 @@ export interface LocatorReceipt {
   repaired: boolean;
 }
 
+export interface RepairScoreEvidence {
+  category: 'ROLE_NAME' | 'LABEL_PLACEHOLDER' | 'STABLE_ATTRIBUTE' | 'CONTEXT' | 'POSITION';
+  points: number;
+  detail: string;
+}
+
+export interface RepairCandidate {
+  locator: SemanticLocator;
+  score: number;
+  evidence: RepairScoreEvidence[];
+  preview: string;
+}
+
+export type RepairProposalStatus = 'AWAITING_APPROVAL' | 'GUIDED_REQUIRED' | 'REJECTED';
+
+export interface RepairProposal {
+  id: string;
+  toolId: string;
+  toolTitle: string;
+  nodeId: string;
+  nodeLabel: string;
+  status: RepairProposalStatus;
+  createdAt: string;
+  originalLocator: SemanticLocator;
+  candidates: RepairCandidate[];
+  error: string;
+}
+
+export interface LocatorRepair {
+  nodeId: string;
+  previousLocator: SemanticLocator;
+  nextLocator: SemanticLocator;
+  score: number;
+  evidence: RepairScoreEvidence[];
+}
+
 export interface ActivityReceipt {
   id: string;
   toolId: string;
@@ -215,6 +251,7 @@ export interface PersonalToolExecutionResult {
   pageUrl: string;
   output: Record<string, JsonValue>;
   selectedLocators: LocatorReceipt[];
+  repairs: LocatorRepair[];
   navigationUrl?: string;
 }
 

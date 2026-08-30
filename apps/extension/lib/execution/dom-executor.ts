@@ -2,8 +2,11 @@ import type {
   JsonPrimitive,
   JsonValue,
   LocatorReceipt,
+  LocatorRepair,
   PersonalToolExecutionResult,
   PersonalToolRecord,
+  RepairCandidate,
+  RepairScoreEvidence,
   SemanticLocator,
   WorkflowNode,
 } from '@personal-webmcp/contracts';
@@ -11,18 +14,44 @@ import type {
 interface ResolvedElement {
   element: HTMLElement;
   strategy: string;
+  score: number;
+  repaired: boolean;
+  nextLocator?: SemanticLocator;
+  evidence: RepairScoreEvidence[];
 }
 
 interface ExecutionContext {
   input: Record<string, JsonValue>;
   output: Record<string, JsonValue>;
   selectedLocators: LocatorReceipt[];
+  repairs: LocatorRepair[];
   pendingNavigation?: string;
   actionsCompleted: number;
 }
 
+export interface RepairRequest {
+  nodeId: string;
+  nodeLabel: string;
+  originalLocator: SemanticLocator;
+  candidates: RepairCandidate[];
+}
+
+export class RepairRequiredError extends Error {
+  constructor(readonly request: RepairRequest) {
+    super(request.candidates.length > 0
+      ? `“${request.nodeLabel}” has more than one plausible replacement.`
+      : `Could not find a safe replacement for “${request.nodeLabel}”.`);
+    this.name = 'RepairRequiredError';
+  }
+}
+
 function normalized(value: string | null | undefined): string {
   return value?.replace(/\s+/g, ' ').trim().toLowerCase() ?? '';
+}
+
+function semanticMatches(expected: string | undefined, actual: string): boolean {
+  const wanted = normalized(expected);
+  return Boolean(wanted && actual && (wanted === actual || wanted.startsWith(actual) || actual.startsWith(wanted)));
 }
 
 function labelText(element: Element): string {
@@ -51,6 +80,84 @@ function accessibleText(element: Element): string {
   return normalized(element.getAttribute('title') || element.textContent);
 }
 
+function inferredRole(element: Element): string | undefined {
+  const explicit = element.getAttribute('role');
+  if (explicit) return explicit;
+  if (element instanceof HTMLButtonElement) return 'button';
+  if (element instanceof HTMLAnchorElement && element.href) return 'link';
+  if (element instanceof HTMLSelectElement) return 'combobox';
+  if (element instanceof HTMLTextAreaElement) return 'textbox';
+  if (element instanceof HTMLInputElement) {
+    if (['button', 'submit', 'reset'].includes(element.type)) return 'button';
+    if (element.type === 'checkbox') return 'checkbox';
+    if (element.type === 'radio') return 'radio';
+    if (element.type === 'range') return 'slider';
+    return 'textbox';
+  }
+  if (element instanceof HTMLTableRowElement) return 'row';
+  return undefined;
+}
+
+function stableAttributes(element: Element): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const name of ['id', 'name', 'data-testid', 'data-test', 'data-qa', 'data-id']) {
+    const value = element.getAttribute(name);
+    if (value && value.length <= 100) attributes[name] = value;
+  }
+  return attributes;
+}
+
+function cssPath(element: Element, depth = 6): string {
+  if (element.id) return `#${CSS.escape(element.id)}`;
+  const segments: string[] = [];
+  let current: Element | null = element;
+  while (current && current !== document.documentElement && segments.length < depth) {
+    let segment = current.tagName.toLowerCase();
+    const siblings = current.parentElement
+      ? [...current.parentElement.children].filter((sibling) => sibling.tagName === current!.tagName)
+      : [];
+    if (siblings.length > 1) segment += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+    segments.unshift(segment);
+    current = current.parentElement;
+  }
+  return segments.join(' > ');
+}
+
+function landmarkText(element: Element): string | undefined {
+  const landmark = element.closest('main, nav, aside, header, footer, form, section, [role="main"], [role="navigation"], [role="region"], [role="form"]');
+  if (!landmark) return undefined;
+  return landmark.getAttribute('aria-label') || landmark.getAttribute('role') || landmark.tagName.toLowerCase();
+}
+
+function formText(element: Element): string | undefined {
+  const form = element.closest('form');
+  return form?.getAttribute('aria-label') || form?.getAttribute('name') || form?.id || undefined;
+}
+
+function locatorForElement(element: HTMLElement, original: SemanticLocator): SemanticLocator {
+  const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+    ? element.placeholder || undefined
+    : undefined;
+  return {
+    role: inferredRole(element),
+    accessibleName: accessibleText(element) || undefined,
+    label: labelText(element) || undefined,
+    placeholder,
+    tagName: element.tagName.toLowerCase(),
+    inputType: element instanceof HTMLInputElement ? element.type : undefined,
+    formName: formText(element),
+    landmark: landmarkText(element),
+    nearbyText: element.parentElement?.textContent?.replace(/\s+/g, ' ').trim().slice(0, 180),
+    stableAttributes: stableAttributes(element),
+    fallbackSelector: cssPath(element),
+    domPath: cssPath(element, 8),
+    origin: window.location.origin,
+    path: `${window.location.pathname}${window.location.search}`,
+    pageTitle: document.title,
+    expectedOutcome: original.expectedOutcome,
+  };
+}
+
 function isVisible(element: Element): element is HTMLElement {
   if (!(element instanceof HTMLElement) || !element.isConnected) return false;
   const style = window.getComputedStyle(element);
@@ -68,55 +175,121 @@ function safeQuery(selector: string | undefined): HTMLElement | undefined {
   }
 }
 
-function queryStableAttribute(locator: SemanticLocator): HTMLElement | undefined {
+function stableTarget(locator: SemanticLocator): HTMLElement | undefined {
   for (const [name, value] of Object.entries(locator.stableAttributes)) {
     const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(value) : value;
-    const selector = name === 'id' ? `#${escaped}` : `${locator.tagName}[${name}="${escaped}"]`;
-    const element = safeQuery(selector);
-    if (element) return element;
+    const target = safeQuery(name === 'id' ? `#${escaped}` : `${locator.tagName}[${name}="${escaped}"]`);
+    if (target) return target;
   }
   return undefined;
 }
 
-function semanticCandidate(locator: SemanticLocator): HTMLElement | undefined {
-  const selector = locator.tagName && locator.tagName !== 'document' ? locator.tagName : '*';
-  let candidates: Element[];
-  try {
-    candidates = [...document.querySelectorAll(selector)];
-  } catch {
-    candidates = [];
+function scoreElement(element: HTMLElement, locator: SemanticLocator): { score: number; evidence: RepairScoreEvidence[] } {
+  const evidence: RepairScoreEvidence[] = [];
+  const roleMatches = Boolean(locator.role && inferredRole(element) === locator.role);
+  const nameMatches = semanticMatches(locator.accessibleName, accessibleText(element));
+  if (roleMatches && nameMatches) evidence.push({ category: 'ROLE_NAME', points: 35, detail: 'Role and accessible name match.' });
+  else if (nameMatches) evidence.push({ category: 'ROLE_NAME', points: 25, detail: 'Accessible name matches.' });
+  else if (roleMatches) evidence.push({ category: 'ROLE_NAME', points: 10, detail: 'Role matches.' });
+
+  if (semanticMatches(locator.label, labelText(element))
+    || semanticMatches(locator.placeholder, element.getAttribute('placeholder') ?? '')) {
+    evidence.push({ category: 'LABEL_PLACEHOLDER', points: 25, detail: 'Label or placeholder matches.' });
   }
-  const visible = candidates.filter(isVisible);
-  const expectedName = normalized(locator.accessibleName);
-  const expectedLabel = normalized(locator.label);
-  const expectedPlaceholder = normalized(locator.placeholder);
 
-  return visible.find((candidate) => expectedName && accessibleText(candidate) === expectedName)
-    ?? visible.find((candidate) => expectedLabel && labelText(candidate) === expectedLabel)
-    ?? visible.find((candidate) => expectedName && accessibleText(candidate).startsWith(expectedName))
-    ?? visible.find((candidate) => expectedLabel && labelText(candidate).startsWith(expectedLabel))
-    ?? visible.find((candidate) => expectedPlaceholder && normalized(candidate.getAttribute('placeholder')) === expectedPlaceholder);
-}
+  const currentAttributes = stableAttributes(element);
+  if (Object.entries(locator.stableAttributes).some(([name, value]) => currentAttributes[name] === value)) {
+    evidence.push({ category: 'STABLE_ATTRIBUTE', points: 15, detail: 'A stable attribute matches.' });
+  }
 
-function resolveElement(locator: SemanticLocator): ResolvedElement | undefined {
+  const originalNearby = normalized(locator.nearbyText);
+  const currentNearby = normalized(element.parentElement?.textContent);
+  if (semanticMatches(locator.formName, normalized(formText(element)))
+    || semanticMatches(locator.landmark, normalized(landmarkText(element)))
+    || Boolean(originalNearby && currentNearby && (originalNearby.includes(currentNearby) || currentNearby.includes(originalNearby)))) {
+    evidence.push({ category: 'CONTEXT', points: 15, detail: 'Form, landmark or nearby context matches.' });
+  }
+
   const fallback = safeQuery(locator.fallbackSelector);
-  if (fallback) return { element: fallback, strategy: 'fallback-selector' };
-  const stable = queryStableAttribute(locator);
-  if (stable) return { element: stable, strategy: 'stable-attribute' };
-  const semantic = semanticCandidate(locator);
-  if (semantic) return { element: semantic, strategy: 'semantic-name' };
-  return undefined;
+  if (fallback === element || (locator.tagName === element.tagName.toLowerCase() && roleMatches)) {
+    evidence.push({ category: 'POSITION', points: 10, detail: fallback === element ? 'Fallback position matches.' : 'Element type and relative role remain compatible.' });
+  }
+
+  return { score: evidence.reduce((total, item) => total + item.points, 0), evidence };
 }
 
-async function waitForResolvedElement(locator: SemanticLocator, signal: AbortSignal, timeoutMs = 5000): Promise<ResolvedElement> {
+function rankedCandidates(locator: SemanticLocator): Array<RepairCandidate & { element: HTMLElement }> {
+  const selector = [locator.tagName, 'button', 'a', 'input', 'select', 'textarea', '[role]', 'tr']
+    .filter(Boolean)
+    .join(',');
+  let elements: HTMLElement[] = [];
+  try {
+    elements = [...document.querySelectorAll(selector)].filter(isVisible);
+  } catch {
+    return [];
+  }
+  return [...new Set(elements)].map((element) => {
+    const { score, evidence } = scoreElement(element, locator);
+    return {
+      element,
+      locator: locatorForElement(element, locator),
+      score,
+      evidence,
+      preview: accessibleText(element) || labelText(element) || `<${element.tagName.toLowerCase()}>`,
+    };
+  }).filter((candidate) => candidate.score >= 35).sort((left, right) => right.score - left.score);
+}
+
+async function waitForResolvedElement(
+  locator: SemanticLocator,
+  signal: AbortSignal,
+  timeoutMs = 5000,
+  node?: WorkflowNode,
+): Promise<ResolvedElement> {
   const startedAt = Date.now();
+  let lastCandidates: Array<RepairCandidate & { element: HTMLElement }> = [];
   while (Date.now() - startedAt < timeoutMs) {
     signal.throwIfAborted();
-    const resolved = resolveElement(locator);
-    if (resolved) return resolved;
+    const direct = safeQuery(locator.fallbackSelector) ?? stableTarget(locator);
+    if (direct) {
+      const scored = scoreElement(direct, locator);
+      if (scored.evidence.some((item) => item.category === 'ROLE_NAME' && item.points >= 25)) {
+        return {
+          element: direct,
+          strategy: safeQuery(locator.fallbackSelector) === direct ? 'fallback-selector' : 'stable-attribute',
+          score: scored.score,
+          repaired: false,
+          evidence: scored.evidence,
+        };
+      }
+    }
+    const candidates = rankedCandidates(locator);
+    if (candidates.length > 0) lastCandidates = candidates;
+    const best = candidates[0];
+    const margin = best ? best.score - (candidates[1]?.score ?? 0) : 0;
+    if (best && best.score >= 85 && margin >= 15) {
+      const fallback = safeQuery(locator.fallbackSelector);
+      const repaired = fallback !== best.element;
+      return {
+        element: best.element,
+        strategy: repaired ? 'semantic-auto-repair' : 'fallback-selector',
+        score: best.score,
+        repaired,
+        nextLocator: repaired ? best.locator : undefined,
+        evidence: best.evidence,
+      };
+    }
+    if (best && best.score >= 65 && Date.now() - startedAt >= Math.min(800, timeoutMs / 2)) break;
     await wait(80, signal);
   }
-  throw new Error(`Could not find “${locator.accessibleName ?? locator.label ?? locator.tagName}” on the visible page.`);
+
+  const viable = lastCandidates.filter((candidate) => candidate.score >= 65).slice(0, 3);
+  throw new RepairRequiredError({
+    nodeId: node?.id ?? 'unknown-node',
+    nodeLabel: node?.label ?? locator.accessibleName ?? locator.label ?? locator.tagName,
+    originalLocator: locator,
+    candidates: viable.map(({ element: _element, ...candidate }) => candidate),
+  });
 }
 
 function wait(durationMs: number, signal: AbortSignal): Promise<void> {
@@ -190,12 +363,21 @@ function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement | HTMLSe
 }
 
 function recordResolution(context: ExecutionContext, node: WorkflowNode, resolved: ResolvedElement): void {
-  context.selectedLocators.push({ nodeId: node.id, strategy: resolved.strategy, repaired: false });
+  context.selectedLocators.push({ nodeId: node.id, strategy: resolved.strategy, score: resolved.score, repaired: resolved.repaired });
+  if (resolved.repaired && resolved.nextLocator) {
+    context.repairs.push({
+      nodeId: node.id,
+      previousLocator: locatorFromNode(node),
+      nextLocator: resolved.nextLocator,
+      score: resolved.score,
+      evidence: resolved.evidence,
+    });
+  }
 }
 
 async function executeDomValueNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal): Promise<void> {
   const locator = locatorFromNode(node);
-  const resolved = await waitForResolvedElement(locator, signal);
+  const resolved = await waitForResolvedElement(locator, signal, 5000, node);
   if (!(resolved.element instanceof HTMLInputElement || resolved.element instanceof HTMLTextAreaElement || resolved.element instanceof HTMLSelectElement)) {
     throw new Error(`${node.label} is no longer an editable control.`);
   }
@@ -208,7 +390,7 @@ async function executeDomValueNode(node: WorkflowNode, context: ExecutionContext
 
 async function executeActivationNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal): Promise<void> {
   const locator = locatorFromNode(node);
-  const resolved = await waitForResolvedElement(locator, signal);
+  const resolved = await waitForResolvedElement(locator, signal, 5000, node);
   await focusTarget(resolved.element, signal);
   recordResolution(context, node, resolved);
   if (resolved.element instanceof HTMLAnchorElement && resolved.element.href) {
@@ -249,17 +431,18 @@ async function executeAssertionNode(node: WorkflowNode, context: ExecutionContex
   if (!outcomeSatisfied(expected, context)) throw new Error(`Postcondition failed: ${expected}.`);
 }
 
-async function executeWaitNode(node: WorkflowNode, signal: AbortSignal): Promise<void> {
+async function executeWaitNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal): Promise<void> {
   const duration = typeof node.config.durationMs === 'number' ? Math.max(0, Math.min(node.config.durationMs, 10000)) : 250;
   if (node.config.locator) {
-    await waitForResolvedElement(locatorFromNode(node), signal, duration || 5000);
+    const resolved = await waitForResolvedElement(locatorFromNode(node), signal, duration || 5000, node);
+    recordResolution(context, node, resolved);
   } else {
     await wait(duration, signal);
   }
 }
 
 async function executeExtractNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal): Promise<void> {
-  const resolved = await waitForResolvedElement(locatorFromNode(node), signal);
+  const resolved = await waitForResolvedElement(locatorFromNode(node), signal, 5000, node);
   const outputName = typeof node.config.outputName === 'string' ? node.config.outputName : node.id;
   const property = typeof node.config.property === 'string' ? node.config.property : 'textContent';
   const raw = property === 'value' && 'value' in resolved.element ? resolved.element.value : resolved.element.textContent;
@@ -282,6 +465,7 @@ export async function executePersonalToolOnPage(
     input,
     output: {},
     selectedLocators: [],
+    repairs: [],
     actionsCompleted: 0,
   };
   const visited = new Set<string>();
@@ -298,7 +482,7 @@ export async function executePersonalToolOnPage(
     } else if (node.type === 'DOM_ACTIVATE') {
       await executeActivationNode(node, context, signal);
     } else if (node.type === 'WAIT_FOR') {
-      await executeWaitNode(node, signal);
+      await executeWaitNode(node, context, signal);
     } else if (node.type === 'EXTRACT') {
       await executeExtractNode(node, context, signal);
     } else if (node.type === 'ASSERT') {
@@ -336,6 +520,7 @@ export async function executePersonalToolOnPage(
     pageUrl: window.location.href,
     output: context.output,
     selectedLocators: context.selectedLocators,
+    repairs: context.repairs,
     navigationUrl: context.pendingNavigation,
   };
 }

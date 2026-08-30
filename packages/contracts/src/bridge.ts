@@ -98,6 +98,8 @@ export interface ActiveTabSnapshot {
   catalog: ToolCatalogPayload;
   personalTools: import('./models').PersonalToolRecord[];
   receipts: import('./models').ActivityReceipt[];
+  repairs: import('./models').RepairProposal[];
+  revisions: import('./models').ToolRevision[];
   teachSession: import('./models').TeachSessionSnapshot;
   activeExecution?: import('./models').ToolExecutionState;
   enabled: boolean;
