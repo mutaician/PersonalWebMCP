@@ -6,13 +6,39 @@ export const BRIDGE_MESSAGE_TYPES = [
   'REFRESH_CATALOG',
   'RUN_PING_SELF_TEST',
   'WITHDRAW_PING',
+  'SYNC_PERSONAL_TOOLS',
+  'PERSONAL_TOOL_RESULT',
   'STATUS',
   'CATALOG',
   'PING_RESULT',
+  'PERSONAL_TOOL_INVOCATION',
+  'PERSONAL_TOOL_CANCEL',
 ] as const;
 
-export type BridgeCommandType = 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING';
-export type BridgeEventType = 'STATUS' | 'CATALOG' | 'PING_RESULT';
+export type BridgeCommandType = 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING' | 'SYNC_PERSONAL_TOOLS' | 'PERSONAL_TOOL_RESULT';
+export type BridgeEventType = 'STATUS' | 'CATALOG' | 'PING_RESULT' | 'PERSONAL_TOOL_INVOCATION' | 'PERSONAL_TOOL_CANCEL';
+
+export interface PersonalToolRegistration {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations: { readOnlyHint: boolean; untrustedContentHint: boolean };
+}
+
+export interface PersonalToolInvocationPayload {
+  invocationId: string;
+  toolId: string;
+  input: Record<string, import('./models').JsonValue>;
+}
+
+export interface PersonalToolInvocationResultPayload {
+  invocationId: string;
+  ok: boolean;
+  result?: import('./models').JsonValue;
+  error?: string;
+}
 
 export interface BridgeEnvelope<TType extends string = string, TPayload = unknown> {
   source: typeof BRIDGE_SOURCE;
@@ -73,6 +99,7 @@ export interface ActiveTabSnapshot {
   personalTools: import('./models').PersonalToolRecord[];
   receipts: import('./models').ActivityReceipt[];
   teachSession: import('./models').TeachSessionSnapshot;
+  activeExecution?: import('./models').ToolExecutionState;
   enabled: boolean;
   origin?: string;
   path?: string;

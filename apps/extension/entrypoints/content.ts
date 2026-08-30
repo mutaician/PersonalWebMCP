@@ -3,12 +3,19 @@ import {
   BRIDGE_VERSION,
   isBridgeEnvelope,
   type BridgeEnvelope,
+  type JsonValue,
+  type PersonalToolExecutionResult,
+  type PersonalToolInvocationPayload,
+  type PersonalToolInvocationResultPayload,
+  type PersonalToolRecord,
+  type PersonalToolRegistration,
   type PingResultPayload,
   type TabCapabilityStatus,
   type TeachSessionSnapshot,
   type ToolCatalogPayload,
   type WebMcpStatusPayload,
 } from '@personal-webmcp/contracts';
+import { executePersonalToolOnPage } from '../lib/execution/dom-executor';
 import { InteractionRecorder } from '../lib/teaching/recorder';
 
 type ContentMessage =
@@ -20,6 +27,9 @@ type ContentMessage =
   | { type: 'RESUME_TEACHING' }
   | { type: 'CANCEL_TEACHING' }
   | { type: 'FINISH_TEACHING' }
+  | { type: 'SYNC_PERSONAL_TOOLS' }
+  | { type: 'EXECUTE_TOOL_WORKFLOW'; tool: PersonalToolRecord; input: Record<string, JsonValue>; invocationId: string }
+  | { type: 'CANCEL_TOOL_WORKFLOW'; invocationId: string }
   | { type: 'REFRESH_CATALOG' }
   | { type: 'RUN_PING_SELF_TEST' };
 
@@ -42,6 +52,7 @@ export default defineContentScript({
       tools: [],
     };
     let currentUrl = window.location.href;
+    const activeExecutions = new Map<string, AbortController>();
     const recorder = new InteractionRecorder((snapshot) => {
       void browser.runtime.sendMessage({ type: 'TEACH_STATE_UPDATED', payload: snapshot }).catch(() => undefined);
     });
@@ -63,14 +74,17 @@ export default defineContentScript({
       // Recording can still start normally if no prior tab session exists.
     }
 
-    const postCommand = (type: 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING') => {
+    const postCommand = (
+      type: 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING' | 'SYNC_PERSONAL_TOOLS' | 'PERSONAL_TOOL_RESULT',
+      payload: unknown = {},
+    ) => {
       const envelope: BridgeEnvelope = {
         source: BRIDGE_SOURCE,
         version: BRIDGE_VERSION,
         tabSessionId,
         requestId: crypto.randomUUID(),
         type,
-        payload: {},
+        payload,
       };
       window.postMessage(envelope, window.location.origin);
     };
@@ -80,12 +94,22 @@ export default defineContentScript({
       await browser.runtime.sendMessage({ type: 'WEBMCP_STATUS', payload: currentStatus });
     };
 
+    const syncPersonalTools = async () => {
+      const tools = await browser.runtime.sendMessage({
+        type: 'GET_SCOPED_PERSONAL_TOOLS',
+        url: window.location.href,
+        supported: currentStatus.supported,
+      }) as PersonalToolRegistration[];
+      postCommand('SYNC_PERSONAL_TOOLS', { tools: Array.isArray(tools) ? tools : [] });
+    };
+
     const onWindowMessage = (event: MessageEvent<unknown>) => {
       if (event.source !== window || event.origin !== window.location.origin) return;
       if (!isBridgeEnvelope(event.data) || event.data.tabSessionId !== tabSessionId) return;
 
       if (event.data.type === 'STATUS') {
-        void publishStatus(event.data.payload as WebMcpStatusPayload);
+        const status = event.data.payload as WebMcpStatusPayload;
+        void publishStatus(status).then(() => syncPersonalTools()).catch(() => undefined);
       }
 
       if (event.data.type === 'CATALOG') {
@@ -106,6 +130,35 @@ export default defineContentScript({
             },
           }),
         ]);
+      }
+
+      if (event.data.type === 'PERSONAL_TOOL_INVOCATION') {
+        const payload = event.data.payload as PersonalToolInvocationPayload;
+        void browser.runtime.sendMessage({ type: 'RUN_PERSONAL_TOOL', ...payload })
+          .then((result: PersonalToolExecutionResult) => {
+            postCommand('PERSONAL_TOOL_RESULT', {
+              invocationId: payload.invocationId,
+              ok: true,
+              result: result as unknown as JsonValue,
+            } satisfies PersonalToolInvocationResultPayload);
+          })
+          .catch((error: unknown) => {
+            postCommand('PERSONAL_TOOL_RESULT', {
+              invocationId: payload.invocationId,
+              ok: false,
+              error: error instanceof Error ? error.message : 'Personal tool execution failed.',
+            } satisfies PersonalToolInvocationResultPayload);
+          });
+      }
+
+      if (event.data.type === 'PERSONAL_TOOL_CANCEL') {
+        const payload = event.data.payload as { invocationId?: string };
+        if (payload.invocationId) {
+          void browser.runtime.sendMessage({
+            type: 'CANCEL_PERSONAL_TOOL',
+            invocationId: payload.invocationId,
+          }).catch(() => undefined);
+        }
       }
     };
 
@@ -130,6 +183,25 @@ export default defineContentScript({
       if (message.type === 'RESUME_TEACHING') return Promise.resolve(recorder.resume());
       if (message.type === 'CANCEL_TEACHING') return Promise.resolve(recorder.cancel());
       if (message.type === 'FINISH_TEACHING') return Promise.resolve(recorder.finish());
+      if (message.type === 'SYNC_PERSONAL_TOOLS') {
+        return syncPersonalTools().then(() => ({ accepted: true }));
+      }
+      if (message.type === 'EXECUTE_TOOL_WORKFLOW') {
+        const controller = new AbortController();
+        activeExecutions.get(message.invocationId)?.abort();
+        activeExecutions.set(message.invocationId, controller);
+        return executePersonalToolOnPage(
+          message.tool,
+          message.input,
+          message.invocationId,
+          controller.signal,
+        ).finally(() => activeExecutions.delete(message.invocationId));
+      }
+      if (message.type === 'CANCEL_TOOL_WORKFLOW') {
+        const controller = activeExecutions.get(message.invocationId);
+        controller?.abort(new DOMException('Tool execution was cancelled.', 'AbortError'));
+        return Promise.resolve({ accepted: Boolean(controller) });
+      }
       if (message.type === 'REFRESH_CATALOG') {
         postCommand('REFRESH_CATALOG');
         return Promise.resolve({ accepted: true });
@@ -143,6 +215,8 @@ export default defineContentScript({
 
     window.addEventListener('pagehide', () => {
       window.clearInterval(navigationTimer);
+      for (const controller of activeExecutions.values()) controller.abort();
+      activeExecutions.clear();
       recorder.dispose();
       postCommand('WITHDRAW_PING');
     }, { once: true });

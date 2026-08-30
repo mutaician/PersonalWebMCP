@@ -190,6 +190,34 @@ export interface ActivityReceipt {
   humanDecision: HumanDecision;
 }
 
+export type ToolExecutionStatus = 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+
+export interface ToolExecutionState {
+  invocationId: string;
+  toolId: string;
+  toolTitle: string;
+  status: ToolExecutionStatus;
+  startedAt: string;
+  finishedAt?: string;
+  input: Record<string, JsonValue>;
+  result?: JsonValue;
+  error?: string;
+}
+
+export interface PersonalToolExecutionResult {
+  ok: true;
+  invocationId: string;
+  toolId: string;
+  toolName: string;
+  message: string;
+  actionsCompleted: number;
+  pageTitle: string;
+  pageUrl: string;
+  output: Record<string, JsonValue>;
+  selectedLocators: LocatorReceipt[];
+  navigationUrl?: string;
+}
+
 export interface ExtensionSettings {
   enabledOrigins: string[];
   receiptLimit: number;

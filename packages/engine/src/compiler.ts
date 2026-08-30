@@ -149,8 +149,13 @@ function addRequiredInvoicePreferences(trace: InteractionTrace, steps: TraceStep
     additions.push(fixedInvoicePreferenceStep(trace, 'Sort by', 'Newest first'));
   }
   if (additions.length === 0) return steps;
+  const lastCapturedFilter = steps.reduce((lastIndex, step, index) => hasCapturedValue(step) ? index : lastIndex, -1);
   const firstActivation = steps.findIndex((step) => step.type === 'ACTIVATE' || step.type === 'SUBMIT' || step.type === 'NAVIGATE');
-  const insertionIndex = firstActivation < 0 ? steps.length : firstActivation;
+  const insertionIndex = lastCapturedFilter >= 0
+    ? lastCapturedFilter + 1
+    : firstActivation >= 0
+      ? firstActivation + 1
+      : steps.length;
   return [...steps.slice(0, insertionIndex), ...additions, ...steps.slice(insertionIndex)];
 }
 
@@ -228,7 +233,10 @@ export function compileTaughtWorkflow(
     description: options.description.trim(),
     scope: {
       origin: trace.origin,
-      pathRules: [{ kind: 'PREFIX', value: options.pathPrefix || '/' }],
+      pathRules: [{
+        kind: options.webmcpName === 'open_latest_unpaid_invoice' ? 'EXACT' : 'PREFIX',
+        value: options.pathPrefix || '/',
+      }],
       prerequisites: ['document.modelContext'],
     },
     inputSchema,

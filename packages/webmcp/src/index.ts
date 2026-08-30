@@ -1,6 +1,11 @@
-import type { DiscoveredWebMcpTool } from '@personal-webmcp/contracts';
+import type {
+  DiscoveredWebMcpTool,
+  JsonValue,
+  PersonalToolRegistration,
+} from '@personal-webmcp/contracts';
 
 const PERSONAL_PING_TOOL_NAME = 'personal_ping';
+const registeredPersonalToolNames = new Set<string>([PERSONAL_PING_TOOL_NAME]);
 
 export interface PingToolResult {
   ok: true;
@@ -72,7 +77,7 @@ export async function discoverWebMcpTools(): Promise<DiscoveredWebMcpTool[]> {
       untrustedContentHint: tool.annotations.untrustedContentHint,
     } : undefined,
     origin: tool.origin || window.location.origin,
-    provenance: tool.name.startsWith('personal_') ? 'PERSONAL' : 'NATIVE',
+    provenance: registeredPersonalToolNames.has(tool.name) || tool.name.startsWith('personal_') ? 'PERSONAL' : 'NATIVE',
   })).sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -113,6 +118,46 @@ export async function registerPersonalPing(signal: AbortSignal): Promise<boolean
     },
     { signal },
   );
+
+  return true;
+}
+
+function normalizeInvocationInput(input: unknown): Record<string, JsonValue> {
+  if (typeof input === 'string') {
+    try {
+      return normalizeInvocationInput(JSON.parse(input));
+    } catch {
+      throw new Error('Tool input must be a valid JSON object.');
+    }
+  }
+  if (input === undefined || input === null) return {};
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Tool input must be an object.');
+  }
+  return cloneSerializableRecord(input) as Record<string, JsonValue>;
+}
+
+export async function registerPersonalTool(
+  registration: PersonalToolRegistration,
+  execute: (input: Record<string, JsonValue>, signal?: AbortSignal) => Promise<JsonValue>,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const modelContext = getModelContext();
+  if (!modelContext) return false;
+
+  await modelContext.registerTool({
+    name: registration.name,
+    title: registration.title,
+    description: registration.description,
+    inputSchema: registration.inputSchema,
+    annotations: registration.annotations,
+    execute: async (input, options) => {
+      options?.signal?.throwIfAborted();
+      return execute(normalizeInvocationInput(input), options?.signal);
+    },
+  }, { signal });
+  registeredPersonalToolNames.add(registration.name);
+  signal.addEventListener('abort', () => registeredPersonalToolNames.delete(registration.name), { once: true });
 
   return true;
 }

@@ -1,13 +1,22 @@
 import type {
   ActiveTabSnapshot,
+  ActivityReceipt,
+  JsonValue,
+  PersonalToolExecutionResult,
+  PersonalToolRegistration,
   PersonalToolRecord,
   PingResultPayload,
   TabCapabilityStatus,
   TeachSessionSnapshot,
   ToolCatalogPayload,
+  ToolExecutionState,
   ToolRevision,
 } from '@personal-webmcp/contracts';
-import { assertPersonalTool, createIdleTeachSession } from '@personal-webmcp/contracts';
+import {
+  assertPersonalTool,
+  createIdleTeachSession,
+  validateInvocationInput,
+} from '@personal-webmcp/contracts';
 import {
   activityReceiptRepository,
   bootstrapPersistence,
@@ -32,6 +41,9 @@ type ExtensionMessage =
   | { type: 'FINISH_TEACHING' }
   | { type: 'TEST_COMPILED_TOOL'; tool: PersonalToolRecord }
   | { type: 'SAVE_COMPILED_TOOL'; tool: PersonalToolRecord }
+  | { type: 'GET_SCOPED_PERSONAL_TOOLS'; url: string; supported: boolean }
+  | { type: 'RUN_PERSONAL_TOOL'; toolId: string; input: Record<string, JsonValue>; invocationId?: string }
+  | { type: 'CANCEL_PERSONAL_TOOL'; invocationId: string }
   | { type: 'GET_ACTIVE_STATUS' }
   | { type: 'GET_PANEL_SNAPSHOT' }
   | { type: 'RUN_PING_SELF_TEST' }
@@ -55,6 +67,46 @@ function getOriginPattern(origin: string): string | undefined {
   const url = getUrl(origin);
   if (!url || url.origin !== origin || !['http:', 'https:'].includes(url.protocol)) return undefined;
   return `${origin}/*`;
+}
+
+function pathMatches(tool: PersonalToolRecord, url: URL): boolean {
+  if (tool.webmcpName === 'open_latest_unpaid_invoice' && url.pathname !== '/legacy') return false;
+  return tool.scope.pathRules.some((rule) => {
+    if (rule.kind === 'EXACT') return url.pathname === rule.value;
+    if (rule.kind === 'PREFIX') return url.pathname.startsWith(rule.value);
+    try {
+      return new RegExp(rule.value).test(url.pathname);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isToolAvailable(tool: PersonalToolRecord, url: URL, supported: boolean): boolean {
+  return supported
+    && tool.provenance.type !== 'SYSTEM'
+    && tool.health.state !== 'BROKEN'
+    && tool.scope.origin === url.origin
+    && pathMatches(tool, url)
+    && tool.scope.prerequisites.every((prerequisite) => prerequisite !== 'document.modelContext' || supported);
+}
+
+function toRegistration(tool: PersonalToolRecord): PersonalToolRegistration {
+  return {
+    id: tool.id,
+    name: tool.webmcpName,
+    title: tool.title,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    annotations: {
+      readOnlyHint: tool.annotations.readOnlyHint,
+      untrustedContentHint: tool.annotations.untrustedContentHint,
+    },
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Personal tool execution failed.';
 }
 
 function registrationId(origin: string): string {
@@ -112,6 +164,7 @@ export default defineBackground(() => {
   const catalogByTab = new Map<number, ToolCatalogPayload>();
   const pingStartedAtByTab = new Map<number, number>();
   const teachSessionByTab = new Map<number, TeachSessionSnapshot>();
+  const executionByTab = new Map<number, ToolExecutionState>();
   const persistenceReady = bootstrapPersistence();
 
   void persistenceReady.then(async () => {
@@ -173,10 +226,129 @@ export default defineBackground(() => {
       teachSession: tab?.id === undefined
         ? createIdleTeachSession()
         : teachSessionByTab.get(tab.id) ?? createIdleTeachSession(),
+      activeExecution: tab?.id === undefined ? undefined : executionByTab.get(tab.id),
       enabled,
       origin,
       path: url?.pathname,
     };
+  };
+
+  const publishExecutionState = async () => {
+    await browser.runtime.sendMessage({ type: 'TOOL_EXECUTION_CHANGED' }).catch(() => undefined);
+  };
+
+  const runPersonalTool = async (
+    tab: Browser.tabs.Tab,
+    toolId: string,
+    rawInput: Record<string, JsonValue>,
+    requestedInvocationId?: string,
+  ): Promise<PersonalToolExecutionResult> => {
+    await persistenceReady;
+    if (tab.id === undefined) throw new Error('No visible page is available for execution.');
+    const existing = executionByTab.get(tab.id);
+    if (existing?.status === 'RUNNING') throw new Error(`${existing.toolTitle} is already running on this page.`);
+
+    const tool = await toolRegistryRepository.get(toolId);
+    if (!tool || tool.provenance.type === 'SYSTEM') throw new Error('The personal tool is no longer available.');
+    const { status } = await getLiveTabData(tab);
+    const url = getUrl(status.url || tab.url);
+    if (!url || !isToolAvailable(tool, url, status.supported)) {
+      throw new Error('This tool is not scoped to the visible page. Open its starting page and try again.');
+    }
+
+    const validation = validateInvocationInput(tool.inputSchema, rawInput ?? {});
+    if (!validation.valid) throw new Error(`Tool input is invalid: ${validation.errors.join('; ')}`);
+    const input = validation.value as Record<string, JsonValue>;
+    const invocationId = requestedInvocationId || crypto.randomUUID();
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+    executionByTab.set(tab.id, {
+      invocationId,
+      toolId: tool.id,
+      toolTitle: tool.title,
+      status: 'RUNNING',
+      startedAt,
+      input,
+    });
+    await publishExecutionState();
+
+    try {
+      const result = await browser.tabs.sendMessage(tab.id, {
+        type: 'EXECUTE_TOOL_WORKFLOW',
+        tool,
+        input,
+        invocationId,
+      }) as PersonalToolExecutionResult;
+      const finishedAtMs = Date.now();
+      const finishedAt = new Date(finishedAtMs).toISOString();
+      const receipt: ActivityReceipt = {
+        id: crypto.randomUUID(),
+        toolId: tool.id,
+        toolVersion: tool.version,
+        origin: url.origin,
+        startedAt,
+        finishedAt,
+        durationMs: Math.max(0, finishedAtMs - startedAtMs),
+        status: 'SUCCEEDED',
+        inputSummary: input,
+        selectedLocators: result.selectedLocators,
+        result: result as unknown as JsonValue,
+        humanDecision: 'NOT_REQUIRED',
+      };
+      const settings = await settingsRepository.get();
+      await activityReceiptRepository.save(receipt, settings.receiptLimit);
+      await toolRegistryRepository.save({
+        ...tool,
+        health: { state: 'HEALTHY', lastVerifiedAt: finishedAt, confidence: 100 },
+        updatedAt: finishedAt,
+      });
+      executionByTab.set(tab.id, {
+        invocationId,
+        toolId: tool.id,
+        toolTitle: tool.title,
+        status: 'SUCCEEDED',
+        startedAt,
+        finishedAt,
+        input,
+        result: result as unknown as JsonValue,
+      });
+      await publishExecutionState();
+      return result;
+    } catch (error) {
+      const finishedAtMs = Date.now();
+      const finishedAt = new Date(finishedAtMs).toISOString();
+      const message = errorMessage(error);
+      const cancelled = error instanceof DOMException && error.name === 'AbortError'
+        || /cancel(?:led|ed)|abort/i.test(message);
+      const receipt: ActivityReceipt = {
+        id: crypto.randomUUID(),
+        toolId: tool.id,
+        toolVersion: tool.version,
+        origin: url.origin,
+        startedAt,
+        finishedAt,
+        durationMs: Math.max(0, finishedAtMs - startedAtMs),
+        status: cancelled ? 'CANCELLED' : 'FAILED',
+        inputSummary: input,
+        selectedLocators: [],
+        error: message,
+        humanDecision: 'NOT_REQUIRED',
+      };
+      const settings = await settingsRepository.get();
+      await activityReceiptRepository.save(receipt, settings.receiptLimit);
+      executionByTab.set(tab.id, {
+        invocationId,
+        toolId: tool.id,
+        toolTitle: tool.title,
+        status: cancelled ? 'CANCELLED' : 'FAILED',
+        startedAt,
+        finishedAt,
+        input,
+        error: message,
+      });
+      await publishExecutionState();
+      throw error;
+    }
   };
 
   browser.runtime.onMessage.addListener(async (message: ExtensionMessage, sender) => {
@@ -226,6 +398,36 @@ export default defineBackground(() => {
       return getPanelSnapshot();
     }
 
+    if (message.type === 'GET_SCOPED_PERSONAL_TOOLS') {
+      await persistenceReady;
+      const url = getUrl(message.url);
+      if (!url || !sender.tab?.url || getOrigin(sender.tab.url) !== url.origin) return [];
+      const tools = await toolRegistryRepository.list();
+      return tools
+        .filter((tool) => isToolAvailable(tool, url, message.supported))
+        .map(toRegistration);
+    }
+
+    if (message.type === 'RUN_PERSONAL_TOOL') {
+      const tab = sender.tab ?? await getActiveTab();
+      if (!tab) throw new Error('Open the tool’s starting page before running it.');
+      return runPersonalTool(tab, message.toolId, message.input ?? {}, message.invocationId);
+    }
+
+    if (message.type === 'CANCEL_PERSONAL_TOOL') {
+      const tab = sender.tab ?? await getActiveTab();
+      if (tab?.id === undefined) return { accepted: false };
+      const execution = executionByTab.get(tab.id);
+      if (!execution || execution.invocationId !== message.invocationId || execution.status !== 'RUNNING') {
+        return { accepted: false };
+      }
+      await browser.tabs.sendMessage(tab.id, {
+        type: 'CANCEL_TOOL_WORKFLOW',
+        invocationId: message.invocationId,
+      });
+      return { accepted: true };
+    }
+
     if (['START_TEACHING', 'PAUSE_TEACHING', 'RESUME_TEACHING', 'CANCEL_TEACHING', 'FINISH_TEACHING'].includes(message.type)) {
       await persistenceReady;
       const activeTab = await getActiveTab();
@@ -271,6 +473,10 @@ export default defineBackground(() => {
         snapshot: structuredClone(message.tool),
       };
       await revisionRepository.save(revision);
+      if (activeTab?.id !== undefined) {
+        void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+      }
+      void browser.runtime.sendMessage({ type: 'PERSONAL_TOOLS_CHANGED' }).catch(() => undefined);
       return { saved: true, toolId: message.tool.id, revisionId: revision.id };
     }
 
@@ -338,5 +544,6 @@ export default defineBackground(() => {
     catalogByTab.delete(tabId);
     pingStartedAtByTab.delete(tabId);
     teachSessionByTab.delete(tabId);
+    executionByTab.delete(tabId);
   });
 });
