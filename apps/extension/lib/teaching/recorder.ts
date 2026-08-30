@@ -112,20 +112,23 @@ function stableAttributes(element: Element): Record<string, string> {
   return stable;
 }
 
+function navigationOutcome(destination: string): string {
+  const target = new URL(destination, window.location.href);
+  const finalSegment = target.pathname.split('/').filter(Boolean).at(-1) ?? '';
+  if (target.origin === window.location.origin && /\d/.test(finalSegment)) {
+    return `path-prefix:${target.pathname.slice(0, target.pathname.lastIndexOf('/') + 1)}`;
+  }
+  return target.origin === window.location.origin ? `path:${target.pathname}` : `url:${target.href}`;
+}
+
 function expectedOutcome(element: Element, stepType: TraceStepType): string {
   if (element instanceof HTMLAnchorElement && element.href) {
     try {
-      const target = new URL(element.href, window.location.href);
-      if (target.origin === window.location.origin && target.pathname.startsWith('/legacy/invoices/')) {
-        return 'path-prefix:/legacy/invoices/';
-      }
-      return target.origin === window.location.origin ? `path:${target.pathname}` : `url:${target.href}`;
+      return navigationOutcome(element.href);
     } catch {
       // Fall through to the interaction-level outcome.
     }
   }
-  const semanticName = [associatedLabel(element), accessibleName(element)].filter(Boolean).join(' ').toLowerCase();
-  if (/vendor|supplier|status|minimum|sort|run query|filter/.test(semanticName)) return 'invoice-results-updated';
   if (stepType === 'INPUT' || stepType === 'SELECT') return 'control-value-set';
   if (stepType === 'SUBMIT') return 'form-submitted';
   return 'target-activated';
@@ -294,7 +297,7 @@ export class InteractionRecorder {
         path: `${window.location.pathname}${window.location.search}`,
         pageTitle: document.title,
         nearbyText: `Navigated from ${previousUrl}`,
-        expectedOutcome: `url:${nextUrl}`,
+        expectedOutcome: navigationOutcome(nextUrl),
       },
     };
     this.appendStep(step);

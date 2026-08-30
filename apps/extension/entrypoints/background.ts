@@ -41,6 +41,7 @@ type ExtensionMessage =
   | { type: 'FINISH_TEACHING' }
   | { type: 'TEST_COMPILED_TOOL'; tool: PersonalToolRecord }
   | { type: 'SAVE_COMPILED_TOOL'; tool: PersonalToolRecord }
+  | { type: 'DELETE_PERSONAL_TOOL'; toolId: string }
   | { type: 'GET_SCOPED_PERSONAL_TOOLS'; url: string; supported: boolean }
   | { type: 'RUN_PERSONAL_TOOL'; toolId: string; input: Record<string, JsonValue>; invocationId?: string }
   | { type: 'CANCEL_PERSONAL_TOOL'; invocationId: string }
@@ -70,7 +71,6 @@ function getOriginPattern(origin: string): string | undefined {
 }
 
 function pathMatches(tool: PersonalToolRecord, url: URL): boolean {
-  if (tool.webmcpName === 'open_latest_unpaid_invoice' && url.pathname !== '/legacy') return false;
   return tool.scope.pathRules.some((rule) => {
     if (rule.kind === 'EXACT') return url.pathname === rule.value;
     if (rule.kind === 'PREFIX') return url.pathname.startsWith(rule.value);
@@ -459,6 +459,12 @@ export default defineBackground(() => {
       if (message.tool.inputSchema.additionalProperties !== false) {
         throw new Error('The generated schema must reject undeclared inputs.');
       }
+      const duplicate = (await toolRegistryRepository.list()).find((tool) => (
+        tool.id !== message.tool.id && tool.webmcpName === message.tool.webmcpName
+      ));
+      if (duplicate) {
+        throw new Error(`The WebMCP name “${message.tool.webmcpName}” is already used by “${duplicate.title}”. Choose a unique tool name.`);
+      }
       if (message.type === 'TEST_COMPILED_TOOL') {
         return { valid: true, message: 'Contract, schema, scope and workflow graph are valid.' };
       }
@@ -478,6 +484,19 @@ export default defineBackground(() => {
       }
       void browser.runtime.sendMessage({ type: 'PERSONAL_TOOLS_CHANGED' }).catch(() => undefined);
       return { saved: true, toolId: message.tool.id, revisionId: revision.id };
+    }
+
+    if (message.type === 'DELETE_PERSONAL_TOOL') {
+      await persistenceReady;
+      const tool = await toolRegistryRepository.get(message.toolId);
+      if (!tool || tool.provenance.type === 'SYSTEM') throw new Error('The personal tool is no longer available.');
+      await toolRegistryRepository.remove(tool.id);
+      const activeTab = await getActiveTab();
+      if (activeTab?.id !== undefined) {
+        void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+      }
+      void browser.runtime.sendMessage({ type: 'PERSONAL_TOOLS_CHANGED' }).catch(() => undefined);
+      return { deleted: true, toolId: tool.id };
     }
 
     if (message.type === 'CLEAR_ACTIVITY_HISTORY') {

@@ -159,10 +159,12 @@ function locatorFromNode(node: WorkflowNode): SemanticLocator {
 function valueForNode(node: WorkflowNode, input: Record<string, JsonValue>): JsonValue {
   if (node.config.valueSource === 'PARAMETER') {
     const parameterName = node.config.parameterName;
-    if (typeof parameterName !== 'string' || !(parameterName in input)) {
+    if (typeof parameterName !== 'string') {
       throw new Error(`Missing required workflow value for ${node.label}.`);
     }
-    return input[parameterName]!;
+    if (parameterName in input) return input[parameterName]!;
+    if ('defaultValue' in node.config) return node.config.defaultValue!;
+    throw new Error(`Missing required workflow value for ${node.label}.`);
   }
   if ('value' in node.config) return node.config.value!;
   throw new Error(`${node.label} has no captured value.`);
@@ -191,29 +193,6 @@ function recordResolution(context: ExecutionContext, node: WorkflowNode, resolve
   context.selectedLocators.push({ nodeId: node.id, strategy: resolved.strategy, repaired: false });
 }
 
-function extractInvoiceContext(element: HTMLElement, context: ExecutionContext): void {
-  if (element instanceof HTMLAnchorElement) {
-    const match = new URL(element.href, window.location.href).pathname.match(/\/legacy\/invoices\/([^/]+)/);
-    if (match?.[1]) context.output.invoiceId = decodeURIComponent(match[1]);
-  }
-  const row = element.closest('tr');
-  if (row) {
-    const cells = [...row.querySelectorAll('td')].map((cell) => cell.textContent?.trim() ?? '');
-    if (cells[0]) context.output.invoiceId = cells[0];
-    if (cells[1]) context.output.vendor = cells[1];
-    if (cells.at(-1)) context.output.amount = cells.at(-1)!;
-  }
-  const card = element.closest('.atlas-invoice-card');
-  if (card) {
-    const id = card.querySelector('.atlas-invoice-identity small')?.textContent?.trim();
-    const vendor = card.querySelector('.atlas-invoice-identity h2')?.textContent?.trim();
-    const amount = card.querySelector('.atlas-invoice-state strong')?.textContent?.trim();
-    if (id) context.output.invoiceId = id;
-    if (vendor) context.output.vendor = vendor;
-    if (amount) context.output.amount = amount;
-  }
-}
-
 async function executeDomValueNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal): Promise<void> {
   const locator = locatorFromNode(node);
   const resolved = await waitForResolvedElement(locator, signal);
@@ -232,7 +211,6 @@ async function executeActivationNode(node: WorkflowNode, context: ExecutionConte
   const resolved = await waitForResolvedElement(locator, signal);
   await focusTarget(resolved.element, signal);
   recordResolution(context, node, resolved);
-  extractInvoiceContext(resolved.element, context);
   if (resolved.element instanceof HTMLAnchorElement && resolved.element.href) {
     context.pendingNavigation = resolved.element.href;
     return;
@@ -241,53 +219,8 @@ async function executeActivationNode(node: WorkflowNode, context: ExecutionConte
   await settle(signal);
 }
 
-function firstVisibleInvoiceTarget(locator: SemanticLocator): ResolvedElement | undefined {
-  if (locator.tagName === 'tr') {
-    const row = [...document.querySelectorAll('.legacy-data-table tbody tr')]
-      .find((candidate) => isVisible(candidate) && /^INV-/i.test(candidate.querySelector('td')?.textContent?.trim() ?? ''));
-    if (row && isVisible(row)) return { element: row, strategy: 'current-first-invoice' };
-  }
-  if (locator.tagName === 'a' || locator.expectedOutcome?.startsWith('path-prefix:/legacy/invoices/')) {
-    const link = [...document.querySelectorAll('a[href*="/legacy/invoices/"]')].find(isVisible);
-    if (link) return { element: link, strategy: 'current-first-invoice-link' };
-  }
-  return undefined;
-}
-
-async function executePersonalActivationNode(
-  node: WorkflowNode,
-  tool: PersonalToolRecord,
-  context: ExecutionContext,
-  signal: AbortSignal,
-): Promise<void> {
-  if (tool.webmcpName !== 'open_latest_unpaid_invoice') {
-    await executeActivationNode(node, context, signal);
-    return;
-  }
-  const locator = locatorFromNode(node);
-  const currentInvoiceTarget = firstVisibleInvoiceTarget(locator);
-  if (!currentInvoiceTarget) {
-    await executeActivationNode(node, context, signal);
-    return;
-  }
-  await focusTarget(currentInvoiceTarget.element, signal);
-  recordResolution(context, node, currentInvoiceTarget);
-  extractInvoiceContext(currentInvoiceTarget.element, context);
-  if (currentInvoiceTarget.element instanceof HTMLAnchorElement) {
-    context.pendingNavigation = currentInvoiceTarget.element.href;
-    return;
-  }
-  currentInvoiceTarget.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-  await settle(signal);
-}
-
 function outcomeSatisfied(expected: string, context: ExecutionContext): boolean {
   if (expected === 'control-value-set' || expected === 'target-activated' || expected === 'form-submitted') return true;
-  if (expected === 'invoice-results-updated') {
-    return [...document.querySelectorAll('.legacy-data-table tbody tr')]
-      .some((row) => isVisible(row) && /^INV-/i.test(row.querySelector('td')?.textContent?.trim() ?? ''))
-      || [...document.querySelectorAll('.atlas-invoice-card')].some(isVisible);
-  }
   if (expected.startsWith('path-prefix:')) {
     const prefix = expected.slice('path-prefix:'.length);
     const candidate = context.pendingNavigation ? new URL(context.pendingNavigation, window.location.href).pathname : window.location.pathname;
@@ -339,29 +272,6 @@ function nextNode(current: WorkflowNode, tool: PersonalToolRecord): WorkflowNode
   return edge ? tool.workflowGraph.nodes.find((candidate) => candidate.id === edge.target) : undefined;
 }
 
-async function prepareInvoiceRegister(context: ExecutionContext, signal: AbortSignal): Promise<void> {
-  const hasInvoiceControls = [...document.querySelectorAll('select, input')].some((element) => (
-    isVisible(element) && /vendor|minimum amount|status|sort by/.test(labelText(element))
-  ));
-  if (hasInvoiceControls) return;
-
-  const entry = [...document.querySelectorAll('nav button')].find((element) => {
-    if (!isVisible(element)) return false;
-    const name = accessibleText(element);
-    return name.startsWith('invoice register') || name.startsWith('invoices');
-  });
-  if (!entry || !isVisible(entry)) throw new Error('Open the invoice register before running this tool.');
-  await focusTarget(entry, signal);
-  entry.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-  context.selectedLocators.push({
-    nodeId: 'prerequisite-invoice-register',
-    strategy: 'semantic-prerequisite',
-    repaired: false,
-  });
-  context.actionsCompleted += 1;
-  await settle(signal);
-}
-
 export async function executePersonalToolOnPage(
   tool: PersonalToolRecord,
   input: Record<string, JsonValue>,
@@ -377,9 +287,6 @@ export async function executePersonalToolOnPage(
   const visited = new Set<string>();
   let node = tool.workflowGraph.nodes.find((candidate) => candidate.id === tool.workflowGraph.entryNodeId);
   if (!node) throw new Error('The workflow entry node is missing.');
-  if (tool.webmcpName === 'open_latest_unpaid_invoice') {
-    await prepareInvoiceRegister(context, signal);
-  }
 
   while (node) {
     signal.throwIfAborted();
@@ -389,7 +296,7 @@ export async function executePersonalToolOnPage(
     if (node.type === 'DOM_INPUT' || node.type === 'DOM_SELECT') {
       await executeDomValueNode(node, context, signal);
     } else if (node.type === 'DOM_ACTIVATE') {
-      await executePersonalActivationNode(node, tool, context, signal);
+      await executeActivationNode(node, context, signal);
     } else if (node.type === 'WAIT_FOR') {
       await executeWaitNode(node, signal);
     } else if (node.type === 'EXTRACT') {
@@ -398,18 +305,9 @@ export async function executePersonalToolOnPage(
       await executeAssertionNode(node, context, signal);
     } else if (node.type === 'NAVIGATE') {
       if (!context.pendingNavigation) {
-        if (tool.webmcpName === 'open_latest_unpaid_invoice') {
-          const link = [...document.querySelectorAll('a[href*="/legacy/invoices/"]')].find(isVisible);
-          if (!link || !(link instanceof HTMLAnchorElement)) {
-            throw new Error('The workflow did not identify a current invoice detail link.');
-          }
-          extractInvoiceContext(link, context);
-          context.pendingNavigation = link.href;
-        } else {
-          const destination = node.config.destination;
-          if (typeof destination !== 'string') throw new Error('The navigation destination is missing.');
-          context.pendingNavigation = new URL(destination, window.location.href).href;
-        }
+        const destination = node.config.destination;
+        if (typeof destination !== 'string') throw new Error('The navigation destination is missing.');
+        context.pendingNavigation = new URL(destination, window.location.href).href;
       }
     } else {
       throw new Error(`${node.type} execution is not available in this workflow yet.`);
@@ -427,15 +325,12 @@ export async function executePersonalToolOnPage(
     }, 900);
   }
 
-  const invoiceId = typeof context.output.invoiceId === 'string' ? context.output.invoiceId : undefined;
   return {
     ok: true,
     invocationId,
     toolId: tool.id,
     toolName: tool.webmcpName,
-    message: invoiceId
-      ? `Opened ${invoiceId} after ${context.actionsCompleted} visible workflow steps.`
-      : `Completed ${context.actionsCompleted} visible workflow steps.`,
+    message: `Completed ${context.actionsCompleted} visible workflow steps.`,
     actionsCompleted: context.actionsCompleted,
     pageTitle: document.title,
     pageUrl: window.location.href,

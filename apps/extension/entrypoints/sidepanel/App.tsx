@@ -73,6 +73,7 @@ interface PersonalToolCardProps {
   execution?: ToolExecutionState;
   onRun: (tool: PersonalToolRecord, input: Record<string, JsonValue>) => Promise<void>;
   onCancel: (invocationId: string) => Promise<void>;
+  onDelete: (tool: PersonalToolRecord) => Promise<void>;
 }
 
 function schemaProperties(tool: PersonalToolRecord): Record<string, Record<string, unknown>> {
@@ -90,7 +91,7 @@ function resultMessage(result: JsonValue | undefined): string | undefined {
   return typeof result.message === 'string' ? result.message : undefined;
 }
 
-function PersonalToolCard({ tool, registered, execution, onRun, onCancel }: PersonalToolCardProps) {
+function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onDelete }: PersonalToolCardProps) {
   const properties = schemaProperties(tool);
   const required = new Set(Array.isArray(tool.inputSchema.required) ? tool.inputSchema.required.filter((name): name is string => typeof name === 'string') : []);
   const [values, setValues] = useState<Record<string, string | boolean>>(() => Object.fromEntries(
@@ -143,14 +144,24 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel }: Pers
           {Object.entries(properties).map(([name, schema]) => (
             <label key={name}>
               <span>{name.replaceAll('_', ' ')} {required.has(name) && <em>required</em>}</span>
-              <input
-                type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'}
-                min={typeof schema.minimum === 'number' ? schema.minimum : undefined}
-                value={String(values[name] ?? '')}
-                placeholder={name === 'vendor' ? 'Try a different vendor' : 'Optional'}
-                onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))}
-                disabled={running}
-              />
+              {schema.type === 'boolean' ? (
+                <input
+                  className="runner-checkbox"
+                  type="checkbox"
+                  checked={Boolean(values[name])}
+                  onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.checked }))}
+                  disabled={running}
+                />
+              ) : (
+                <input
+                  type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'}
+                  min={typeof schema.minimum === 'number' ? schema.minimum : undefined}
+                  value={String(values[name] ?? '')}
+                  placeholder={`Enter ${name.replaceAll('_', ' ')}`}
+                  onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))}
+                  disabled={running}
+                />
+              )}
             </label>
           ))}
         </div>
@@ -176,6 +187,10 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel }: Pers
         <div><dt>Workflow nodes</dt><dd>{tool.workflowGraph.nodes.length}</dd></div>
         <div><dt>Health</dt><dd>{tool.health.state.replaceAll('_', ' ')}</dd></div>
       </dl>
+      <div className="runner-management">
+        <span>Each taught workflow is stored separately.</span>
+        <button type="button" onClick={() => void onDelete(tool)} disabled={running}>Delete tool</button>
+      </div>
       <details className="contract-details">
         <summary>View generated contract</summary>
         <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
@@ -257,6 +272,17 @@ export default function App() {
     setActionError('');
     await browser.runtime.sendMessage({ type: 'CANCEL_PERSONAL_TOOL', invocationId });
     window.setTimeout(() => void refresh(), 150);
+  };
+
+  const deletePersonalTool = async (tool: PersonalToolRecord) => {
+    if (!window.confirm(`Delete “${tool.title}”? Its existing activity receipts will remain.`)) return;
+    setActionError('');
+    try {
+      await browser.runtime.sendMessage({ type: 'DELETE_PERSONAL_TOOL', toolId: tool.id });
+      await refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not delete the personal tool.');
+    }
   };
 
   const runSelfTest = async () => {
@@ -411,6 +437,7 @@ export default function App() {
                   execution={snapshot.activeExecution?.toolId === tool.id ? snapshot.activeExecution : undefined}
                   onRun={runPersonalTool}
                   onCancel={cancelPersonalTool}
+                  onDelete={deletePersonalTool}
                   key={tool.id}
                 />
               ))
@@ -447,6 +474,7 @@ export default function App() {
               execution={snapshot.activeExecution?.toolId === tool.id ? snapshot.activeExecution : undefined}
               onRun={runPersonalTool}
               onCancel={cancelPersonalTool}
+              onDelete={deletePersonalTool}
               key={tool.id}
             />
           ))}

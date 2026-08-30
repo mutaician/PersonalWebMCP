@@ -266,10 +266,7 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
         })}
       </div>
 
-      <div className="compiler-heading"><p className="overline">GENERATED CONTRACT</p><h2>Personal tool</h2><p>Edit what the agent will see and what inputs it may provide.</p></div>
-      {draft.webmcpName === 'open_latest_unpaid_invoice' && (
-        <div className="fixed-preferences"><span>FIXED PREFERENCES</span><p><strong>Status</strong> Unpaid</p><p><strong>Sort</strong> Newest first</p></div>
-      )}
+      <div className="compiler-heading"><p className="overline">GENERATED CONTRACT</p><h2>Independent personal tool</h2><p>This recording has its own unique name. Edit what the agent sees, which values vary, and which remain fixed.</p></div>
       <div className="contract-form">
         <label>Tool name<input value={draft.webmcpName} onChange={(event) => updateDraft('webmcpName', event.target.value)} /></label>
         <label>Display title<input value={draft.title} onChange={(event) => updateDraft('title', event.target.value)} /></label>
@@ -283,7 +280,7 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
       {error && <p className="notice error" role="alert">{error}</p>}
       {testResult && <p className="notice success-notice" role="status">{testResult}</p>}
       <div className="compile-actions"><button type="button" onClick={() => void testDraft()} disabled={busy}>Test draft</button><button className="primary-button" type="button" onClick={() => void saveTool()} disabled={busy || !testResult}>{busy ? 'Working…' : 'Save personal tool'}</button></div>
-      <p className="hint">Draft testing validates the contract, schema, scope and graph. Visible replay starts in Step 8.</p>
+      <p className="hint">Draft testing checks the contract and graph. Once saved, run the tool from the visible page or through WebMCP.</p>
     </section>
   );
 }

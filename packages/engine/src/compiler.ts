@@ -44,20 +44,7 @@ function normalizeParameterName(value: string): string {
     .replace(/^[0-9]/, 'value_$&') || 'value';
 }
 
-function targetText(step: TraceStep): string {
-  const locator = step.locator;
-  return [locator?.label, locator?.accessibleName, locator?.placeholder, locator?.nearbyText]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-}
-
 function inferredParameterName(step: TraceStep): string {
-  const text = targetText(step);
-  if (text.includes('vendor') || text.includes('supplier')) return 'vendor';
-  if (text.includes('minimum') || text.includes('amount')) return 'min_amount';
-  if (text.includes('status')) return 'status';
-  if (text.includes('sort')) return 'sort_order';
   return normalizeParameterName(step.locator?.label ?? step.locator?.accessibleName ?? step.type.toLowerCase());
 }
 
@@ -67,41 +54,50 @@ function hasCapturedValue(step: TraceStep): boolean {
 
 export function suggestStepCompilationChoice(step: TraceStep): StepCompilationChoice {
   const parameterName = inferredParameterName(step);
-  const shouldExpose = parameterName === 'vendor' || parameterName === 'min_amount';
+  const shouldExpose = step.type === 'INPUT';
   return {
     stepId: step.id,
     include: step.type !== 'SKIPPED_SENSITIVE',
     valueMode: hasCapturedValue(step) && shouldExpose ? 'PARAMETER' : 'FIXED',
     parameterName: hasCapturedValue(step) ? parameterName : undefined,
-    required: parameterName === 'vendor',
+    required: false,
   };
 }
 
 export function suggestTaughtToolIdentity(trace: InteractionTrace) {
-  const invoiceWorkflow = trace.path.startsWith('/legacy')
-    || trace.steps.some((step) => targetText(step).includes('invoice'));
-
-  if (invoiceWorkflow) {
-    return {
-      webmcpName: 'open_latest_unpaid_invoice',
-      title: 'Open latest unpaid invoice',
-      description: 'Find the newest unpaid invoice for a vendor above an optional minimum amount and open its detail page.',
-      pathPrefix: '/legacy',
-    };
-  }
-
+  const finalAction = [...trace.steps].reverse().find((step) => (
+    step.type === 'ACTIVATE' || step.type === 'SUBMIT'
+  ));
+  const rawTitle = finalAction?.locator?.label
+    ?? finalAction?.locator?.accessibleName
+    ?? finalAction?.locator?.nearbyText
+    ?? 'Taught workflow';
+  const title = rawTitle
+    .replace(/\b(?:INV|PO|SR)-\d+\b/gi, '')
+    .replace(/[$€£]\s?[\d,.]+.*$/, '')
+    .replace(/\d[\d,. \s]*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 56) || 'Taught workflow';
+  const uniqueSuffix = trace.id.replace(/[^a-z0-9]/gi, '').slice(0, 6).toLowerCase() || 'tool';
+  const pathPrefix = trace.path.split('?')[0] || '/';
   return {
-    webmcpName: 'personal_taught_workflow',
-    title: 'Taught workflow',
-    description: `Repeat the workflow taught on ${trace.pageTitle}.`,
-    pathPrefix: trace.path || '/',
+    webmcpName: `personal_${normalizeParameterName(title)}_${uniqueSuffix}`,
+    title,
+    description: `Repeat the ${trace.steps.filter((step) => step.type !== 'SKIPPED_SENSITIVE').length}-step workflow taught on ${trace.pageTitle}.`,
+    pathPrefix,
   };
 }
 
 function schemaForValue(value: JsonValue | undefined, description: string): JsonSchema {
-  if (typeof value === 'number') return { type: 'number', minimum: 0, description };
-  if (typeof value === 'boolean') return { type: 'boolean', description };
-  return { type: 'string', minLength: 1, description };
+  if (typeof value === 'number') return { type: 'number', minimum: 0, description, default: value };
+  if (typeof value === 'boolean') return { type: 'boolean', description, default: value };
+  return {
+    type: 'string',
+    ...(typeof value === 'string' && value.length > 0 ? { minLength: 1 } : {}),
+    description,
+    default: value ?? '',
+  };
 }
 
 function nodeTypeForStep(step: TraceStep): WorkflowNode['type'] {
@@ -115,50 +111,6 @@ function asJsonValue(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
-function fixedInvoicePreferenceStep(
-  trace: InteractionTrace,
-  label: 'Status' | 'Sort by',
-  value: string,
-): TraceStep {
-  return {
-    id: `compiler-${label.toLowerCase().replaceAll(' ', '-')}`,
-    type: 'SELECT',
-    occurredAt: trace.finishedAt ?? new Date().toISOString(),
-    value,
-    locator: {
-      role: 'combobox',
-      accessibleName: label,
-      label,
-      tagName: 'select',
-      stableAttributes: {},
-      origin: trace.origin,
-      path: trace.path,
-      pageTitle: trace.pageTitle,
-      expectedOutcome: 'control-value-set',
-    },
-  };
-}
-
-function addRequiredInvoicePreferences(trace: InteractionTrace, steps: TraceStep[], webmcpName: string): TraceStep[] {
-  if (webmcpName !== 'open_latest_unpaid_invoice') return steps;
-  const additions: TraceStep[] = [];
-  if (!steps.some((step) => targetText(step).includes('status'))) {
-    additions.push(fixedInvoicePreferenceStep(trace, 'Status', 'Unpaid'));
-  }
-  if (!steps.some((step) => targetText(step).includes('sort'))) {
-    additions.push(fixedInvoicePreferenceStep(trace, 'Sort by', 'Newest first'));
-  }
-  if (additions.length === 0) return steps;
-  const lastCapturedFilter = steps.reduce((lastIndex, step, index) => hasCapturedValue(step) ? index : lastIndex, -1);
-  const firstActivation = steps.findIndex((step) => step.type === 'ACTIVATE' || step.type === 'SUBMIT' || step.type === 'NAVIGATE');
-  const insertionIndex = lastCapturedFilter >= 0
-    ? lastCapturedFilter + 1
-    : firstActivation >= 0
-      ? firstActivation + 1
-      : steps.length;
-  return [...steps.slice(0, insertionIndex), ...additions, ...steps.slice(insertionIndex)];
-}
-
 export function compileTaughtWorkflow(
   trace: InteractionTrace,
   choices: StepCompilationChoice[],
@@ -167,8 +119,7 @@ export function compileTaughtWorkflow(
   if (trace.status !== 'COMPLETED') throw new Error('Only a completed teaching trace can be compiled.');
   const now = options.now ?? new Date().toISOString();
   const choiceByStep = new Map(choices.map((choice) => [choice.stepId, choice]));
-  const selectedSteps = trace.steps.filter((step) => choiceByStep.get(step.id)?.include && step.type !== 'SKIPPED_SENSITIVE');
-  const capturedSteps = addRequiredInvoicePreferences(trace, selectedSteps, options.webmcpName);
+  const capturedSteps = trace.steps.filter((step) => choiceByStep.get(step.id)?.include && step.type !== 'SKIPPED_SENSITIVE');
   if (capturedSteps.length === 0) throw new Error('Keep at least one captured interaction.');
 
   const properties: Record<string, JsonSchema> = {};
@@ -187,6 +138,7 @@ export function compileTaughtWorkflow(
         const parameterName = normalizeParameterName(choice.parameterName ?? inferredParameterName(step));
         config.valueSource = 'PARAMETER';
         config.parameterName = parameterName;
+        config.defaultValue = asJsonValue(step.value);
         properties[parameterName] ??= schemaForValue(
           step.value,
           `Value for ${step.locator?.label ?? step.locator?.accessibleName ?? step.type.toLowerCase()}.`,
@@ -233,10 +185,7 @@ export function compileTaughtWorkflow(
     description: options.description.trim(),
     scope: {
       origin: trace.origin,
-      pathRules: [{
-        kind: options.webmcpName === 'open_latest_unpaid_invoice' ? 'EXACT' : 'PREFIX',
-        value: options.pathPrefix || '/',
-      }],
+      pathRules: [{ kind: 'PREFIX', value: options.pathPrefix || '/' }],
       prerequisites: ['document.modelContext'],
     },
     inputSchema,
