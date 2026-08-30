@@ -12,7 +12,7 @@ export default defineConfig({
     web_accessible_resources: [
       {
         resources: ['webmcp-main.js'],
-        matches: ['http://localhost:3000/*'],
+        matches: ['http://*/*', 'https://*/*'],
       },
     ],
     action: {

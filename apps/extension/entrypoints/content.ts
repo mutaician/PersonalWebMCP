@@ -5,10 +5,15 @@ import {
   type BridgeEnvelope,
   type PingResultPayload,
   type TabCapabilityStatus,
+  type ToolCatalogPayload,
   type WebMcpStatusPayload,
 } from '@personal-webmcp/contracts';
 
-type ContentMessage = { type: 'GET_STATUS' } | { type: 'RUN_PING_SELF_TEST' };
+type ContentMessage =
+  | { type: 'GET_STATUS' }
+  | { type: 'GET_CATALOG' }
+  | { type: 'REFRESH_CATALOG' }
+  | { type: 'RUN_PING_SELF_TEST' };
 
 export default defineContentScript({
   matches: ['http://localhost:3000/*'],
@@ -22,8 +27,15 @@ export default defineContentScript({
       url: window.location.href,
       updatedAt: Date.now(),
     };
+    let currentCatalog: ToolCatalogPayload = {
+      supported: false,
+      pageTitle: document.title,
+      url: window.location.href,
+      tools: [],
+    };
+    let currentUrl = window.location.href;
 
-    const postCommand = (type: 'INITIALIZE' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING') => {
+    const postCommand = (type: 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING') => {
       const envelope: BridgeEnvelope = {
         source: BRIDGE_SOURCE,
         version: BRIDGE_VERSION,
@@ -48,6 +60,11 @@ export default defineContentScript({
         void publishStatus(event.data.payload as WebMcpStatusPayload);
       }
 
+      if (event.data.type === 'CATALOG') {
+        currentCatalog = event.data.payload as ToolCatalogPayload;
+        void browser.runtime.sendMessage({ type: 'WEBMCP_CATALOG', payload: currentCatalog });
+      }
+
       if (event.data.type === 'PING_RESULT') {
         const payload = event.data.payload as PingResultPayload;
         void Promise.all([
@@ -68,8 +85,19 @@ export default defineContentScript({
     await injectScript('/webmcp-main.js', { keepInDom: true });
     postCommand('INITIALIZE');
 
+    const navigationTimer = window.setInterval(() => {
+      if (window.location.href === currentUrl) return;
+      currentUrl = window.location.href;
+      postCommand('REFRESH_CATALOG');
+    }, 500);
+
     browser.runtime.onMessage.addListener((message: ContentMessage) => {
       if (message.type === 'GET_STATUS') return Promise.resolve(currentStatus);
+      if (message.type === 'GET_CATALOG') return Promise.resolve(currentCatalog);
+      if (message.type === 'REFRESH_CATALOG') {
+        postCommand('REFRESH_CATALOG');
+        return Promise.resolve({ accepted: true });
+      }
       if (message.type === 'RUN_PING_SELF_TEST') {
         postCommand('RUN_PING_SELF_TEST');
         return Promise.resolve({ accepted: true });
@@ -77,6 +105,9 @@ export default defineContentScript({
       return undefined;
     });
 
-    window.addEventListener('pagehide', () => postCommand('WITHDRAW_PING'), { once: true });
+    window.addEventListener('pagehide', () => {
+      window.clearInterval(navigationTimer);
+      postCommand('WITHDRAW_PING');
+    }, { once: true });
   },
 });

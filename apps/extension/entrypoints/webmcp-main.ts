@@ -4,13 +4,16 @@ import {
   isBridgeEnvelope,
   type BridgeEnvelope,
   type PingResultPayload,
+  type ToolCatalogPayload,
   type WebMcpStatusPayload,
 } from '@personal-webmcp/contracts';
 import {
+  discoverWebMcpTools,
   executePersonalPing,
   isWebMcpSupported,
   PERSONAL_PING_TOOL_NAME,
   registerPersonalPing,
+  watchWebMcpToolChanges,
 } from '@personal-webmcp/webmcp';
 
 interface PersonalWebMcpPageState {
@@ -28,8 +31,12 @@ export default defineUnlistedScript(() => {
 
   let tabSessionId = '';
   let registrationController: AbortController | undefined;
+  let stopWatchingTools: () => void = () => undefined;
 
-  const postEvent = (type: 'STATUS' | 'PING_RESULT', payload: WebMcpStatusPayload | PingResultPayload) => {
+  const postEvent = (
+    type: 'STATUS' | 'CATALOG' | 'PING_RESULT',
+    payload: WebMcpStatusPayload | ToolCatalogPayload | PingResultPayload,
+  ) => {
     if (!tabSessionId) return;
     const envelope: BridgeEnvelope = {
       source: BRIDGE_SOURCE,
@@ -51,12 +58,26 @@ export default defineUnlistedScript(() => {
     ...overrides,
   });
 
+  const publishCatalog = async () => {
+    const supported = isWebMcpSupported();
+    const tools = supported ? await discoverWebMcpTools() : [];
+    postEvent('CATALOG', {
+      supported,
+      pageTitle: document.title,
+      url: window.location.href,
+      tools,
+    } satisfies ToolCatalogPayload);
+  };
+
   const initialize = async () => {
+    stopWatchingTools();
+    stopWatchingTools = () => undefined;
     registrationController?.abort();
     registrationController = undefined;
 
     if (!isWebMcpSupported()) {
       postEvent('STATUS', statusPayload());
+      await publishCatalog();
       return;
     }
 
@@ -64,12 +85,25 @@ export default defineUnlistedScript(() => {
     try {
       const registered = await registerPersonalPing(controller.signal);
       registrationController = registered ? controller : undefined;
+      stopWatchingTools = watchWebMcpToolChanges(() => void publishCatalog());
       postEvent('STATUS', statusPayload({ registered }));
+      await publishCatalog();
     } catch (error) {
       controller.abort();
       postEvent('STATUS', statusPayload({
         registered: false,
         error: error instanceof Error ? error.message : 'Tool registration failed.',
+      }));
+    }
+  };
+
+  const refreshPageState = async () => {
+    postEvent('STATUS', statusPayload());
+    try {
+      await publishCatalog();
+    } catch (error) {
+      postEvent('STATUS', statusPayload({
+        error: error instanceof Error ? error.message : 'Tool discovery failed.',
       }));
     }
   };
@@ -94,9 +128,13 @@ export default defineUnlistedScript(() => {
     if (event.data.type === 'INITIALIZE') {
       tabSessionId = event.data.tabSessionId;
       void initialize();
+    } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'REFRESH_CATALOG') {
+      void refreshPageState();
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'RUN_PING_SELF_TEST') {
       void runSelfTest();
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'WITHDRAW_PING') {
+      stopWatchingTools();
+      stopWatchingTools = () => undefined;
       registrationController?.abort();
       registrationController = undefined;
     }
@@ -104,6 +142,7 @@ export default defineUnlistedScript(() => {
 
   const dispose = () => {
     window.removeEventListener('message', onMessage);
+    stopWatchingTools();
     registrationController?.abort();
     registrationController = undefined;
   };

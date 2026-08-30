@@ -1,5 +1,22 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { TabCapabilityStatus } from '@personal-webmcp/contracts';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type {
+  ActiveTabSnapshot,
+  ActivityReceipt,
+  DiscoveredWebMcpTool,
+  PersonalToolRecord,
+  TabCapabilityStatus,
+  ToolCatalogPayload,
+} from '@personal-webmcp/contracts';
+
+type PanelSection = 'overview' | 'teach' | 'tools' | 'activity' | 'repair';
+
+const panelLabels: Record<PanelSection, string> = {
+  overview: 'Overview',
+  teach: 'Teach',
+  tools: 'Tools',
+  activity: 'Activity',
+  repair: 'Repair',
+};
 
 const emptyStatus: TabCapabilityStatus = {
   supported: false,
@@ -9,37 +26,167 @@ const emptyStatus: TabCapabilityStatus = {
   updatedAt: 0,
 };
 
+const emptyCatalog: ToolCatalogPayload = {
+  supported: false,
+  pageTitle: '',
+  url: '',
+  tools: [],
+};
+
+const emptySnapshot: ActiveTabSnapshot = {
+  status: emptyStatus,
+  catalog: emptyCatalog,
+  personalTools: [],
+  receipts: [],
+  enabled: false,
+};
+
+function DiscoveredToolCard({ tool }: { tool: DiscoveredWebMcpTool }) {
+  return (
+    <details className="tool-card">
+      <summary>
+        <div>
+          <span className={`provenance ${tool.provenance.toLowerCase()}`}>{tool.provenance}</span>
+          <strong>{tool.title}</strong>
+          <code>{tool.name}</code>
+        </div>
+        <span aria-hidden="true">＋</span>
+      </summary>
+      <p>{tool.description}</p>
+      <dl className="compact-list">
+        <div><dt>Origin</dt><dd>{tool.origin}</dd></div>
+        <div><dt>Read only</dt><dd>{tool.annotations?.readOnlyHint ? 'Yes' : 'No / unspecified'}</dd></div>
+      </dl>
+      <pre>{JSON.stringify(tool.inputSchema ?? {}, null, 2)}</pre>
+    </details>
+  );
+}
+
+function PersonalToolCard({ tool }: { tool: PersonalToolRecord }) {
+  return (
+    <details className="tool-card">
+      <summary>
+        <div>
+          <span className="provenance personal">{tool.provenance.type}</span>
+          <strong>{tool.title}</strong>
+          <code>{tool.webmcpName}</code>
+        </div>
+        <span aria-hidden="true">＋</span>
+      </summary>
+      <p>{tool.description}</p>
+      <dl className="compact-list">
+        <div><dt>Scope</dt><dd>{tool.scope.origin}</dd></div>
+        <div><dt>Version</dt><dd>{tool.version}</dd></div>
+        <div><dt>Health</dt><dd>{tool.health.state.replaceAll('_', ' ')}</dd></div>
+      </dl>
+      <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
+    </details>
+  );
+}
+
+function ReceiptRow({ receipt }: { receipt: ActivityReceipt }) {
+  return (
+    <article className="receipt">
+      <div>
+        <span className={`receipt-status ${receipt.status.toLowerCase()}`}>{receipt.status}</span>
+        <strong>{receipt.toolId}</strong>
+      </div>
+      <p>{new Date(receipt.finishedAt).toLocaleString()} · {receipt.durationMs} ms</p>
+      {receipt.error && <p className="error">{receipt.error}</p>}
+    </article>
+  );
+}
+
 export default function App() {
-  const [status, setStatus] = useState<TabCapabilityStatus>(emptyStatus);
+  const [section, setSection] = useState<PanelSection>('overview');
+  const [snapshot, setSnapshot] = useState<ActiveTabSnapshot>(emptySnapshot);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
 
   const refresh = useCallback(async () => {
-    const nextStatus = await browser.runtime.sendMessage({ type: 'GET_ACTIVE_STATUS' }) as TabCapabilityStatus | undefined;
-    setStatus(nextStatus ?? emptyStatus);
+    try {
+      const next = await browser.runtime.sendMessage({ type: 'GET_PANEL_SNAPSHOT' }) as ActiveTabSnapshot;
+      setSnapshot(next ?? emptySnapshot);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not read the active tab.');
+    }
   }, []);
 
   useEffect(() => {
     void refresh();
     const intervalId = window.setInterval(() => void refresh(), 1500);
-    return () => window.clearInterval(intervalId);
+    const onMessage = (message: { type?: string }) => {
+      if (message.type === 'WEBMCP_STATUS' || message.type === 'WEBMCP_CATALOG') void refresh();
+    };
+    browser.runtime.onMessage.addListener(onMessage);
+    return () => {
+      window.clearInterval(intervalId);
+      browser.runtime.onMessage.removeListener(onMessage);
+    };
   }, [refresh]);
+
+  const nativeTools = useMemo(
+    () => snapshot.catalog.tools.filter((tool) => tool.provenance === 'NATIVE'),
+    [snapshot.catalog.tools],
+  );
+  const registeredPersonalTools = useMemo(
+    () => snapshot.catalog.tools.filter((tool) => tool.provenance === 'PERSONAL'),
+    [snapshot.catalog.tools],
+  );
 
   const runSelfTest = async () => {
     setBusy(true);
+    setActionError('');
     try {
       await browser.runtime.sendMessage({ type: 'RUN_PING_SELF_TEST' });
-      window.setTimeout(() => void refresh(), 300);
+      window.setTimeout(() => void refresh(), 500);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Connection check failed.');
     } finally {
       setBusy(false);
     }
   };
 
-  let host = 'Open the local demo';
+  const enableOrigin = async () => {
+    if (!snapshot.origin) return;
+    setBusy(true);
+    setActionError('');
+    try {
+      const granted = await browser.permissions.request({ origins: [`${snapshot.origin}/*`] });
+      if (!granted) {
+        setActionError('Site access was not granted.');
+        return;
+      }
+      await browser.runtime.sendMessage({ type: 'ENABLE_ORIGIN', origin: snapshot.origin });
+      window.setTimeout(() => void refresh(), 500);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not enable this site.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearActivity = async () => {
+    setBusy(true);
+    setActionError('');
+    try {
+      await browser.runtime.sendMessage({ type: 'CLEAR_ACTIVITY_HISTORY' });
+      await refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not clear activity.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let host = 'Open a web page';
   try {
-    host = status.url ? new URL(status.url).host : host;
+    host = snapshot.status.url ? new URL(snapshot.status.url).host : host;
   } catch {
     // Keep the readable fallback for malformed or unavailable tab URLs.
   }
+
+  const totalTools = nativeTools.length + snapshot.personalTools.length;
 
   return (
     <main>
@@ -49,16 +196,23 @@ export default function App() {
           <p className="overline">CAPABILITY LAYER</p>
           <h1>PersonalWebMCP</h1>
         </div>
-        <span className={status.supported ? 'support supported' : 'support'}>
-          {status.supported ? 'Available' : 'Unavailable'}
+        <span className={snapshot.status.supported ? 'support supported' : 'support'}>
+          {snapshot.status.supported ? 'Available' : 'Unavailable'}
         </span>
       </header>
 
       <nav aria-label="PersonalWebMCP sections">
-        <button className="active" type="button">Overview</button>
-        <button type="button" disabled>Teach</button>
-        <button type="button" disabled>Tools</button>
-        <button type="button" disabled>Activity</button>
+        {(['overview', 'teach', 'tools', 'activity', 'repair'] as const).map((item) => (
+          <button
+            className={section === item ? 'active' : ''}
+            type="button"
+            aria-current={section === item ? 'page' : undefined}
+            onClick={() => setSection(item)}
+            key={item}
+          >
+            {panelLabels[item]}
+          </button>
+        ))}
       </nav>
 
       <section className="site-summary">
@@ -66,36 +220,141 @@ export default function App() {
         <div className="site-row">
           <div>
             <strong>{host}</strong>
-            <span>{status.pageTitle || 'No permitted page is active'}</span>
+            <span>{snapshot.path || snapshot.status.pageTitle || 'No permitted page is active'}</span>
           </div>
-          <span className="tool-count">{status.registered ? '1 tool' : '0 tools'}</span>
+          <span className="tool-count">{totalTools} {totalTools === 1 ? 'tool' : 'tools'}</span>
         </div>
       </section>
 
-      <section className="bridge-card">
-        <div className="bridge-heading">
-          <span className="number">01</span>
-          <div>
-            <h2>WebMCP bridge</h2>
-            <p>{status.registered ? 'Personal tool registered in the page context.' : 'Waiting for WebMCP registration.'}</p>
+      {actionError && <p className="notice error" role="alert">{actionError}</p>}
+
+      {!snapshot.enabled && snapshot.origin && (
+        <section className="permission-card">
+          <p className="overline">SITE ACCESS</p>
+          <h2>Enable PersonalWebMCP here</h2>
+          <p>Grant access only to <strong>{snapshot.origin}</strong>. Other sites remain inaccessible.</p>
+          <button className="primary-button" type="button" onClick={enableOrigin} disabled={busy}>
+            {busy ? 'Enabling…' : 'Enable this site'}
+          </button>
+        </section>
+      )}
+
+      {section === 'overview' && (
+        <>
+          <section className="bridge-card">
+            <div className="bridge-heading">
+              <span className="number">01</span>
+              <div>
+                <h2>WebMCP bridge</h2>
+                <p>
+                  {snapshot.status.registered
+                    ? 'Personal tools are registered in the visible page.'
+                    : 'Waiting for a permitted WebMCP-enabled page.'}
+                </p>
+              </div>
+            </div>
+
+            <dl>
+              <div><dt>Page API</dt><dd>{snapshot.status.supported ? 'Detected' : 'Not detected'}</dd></div>
+              <div><dt>Native tools</dt><dd>{nativeTools.length}</dd></div>
+              <div><dt>Personal tools</dt><dd>{snapshot.personalTools.length}</dd></div>
+              <div><dt>Registration</dt><dd>{snapshot.status.registered ? 'Active' : 'Inactive'}</dd></div>
+            </dl>
+
+            {snapshot.status.error && <p className="error" role="alert">{snapshot.status.error}</p>}
+
+            <button
+              className="primary-button"
+              type="button"
+              onClick={runSelfTest}
+              disabled={!snapshot.status.registered || busy}
+            >
+              {busy ? 'Running…' : 'Run connection check'}
+            </button>
+          </section>
+
+          <section className="section-block">
+            <div className="section-heading">
+              <div><p className="overline">PERSONAL</p><h2>Available capabilities</h2></div>
+              <button className="text-button" type="button" onClick={() => setSection('teach')}>Teach new</button>
+            </div>
+            {snapshot.personalTools.length > 0
+              ? snapshot.personalTools.map((tool) => <PersonalToolCard tool={tool} key={tool.id} />)
+              : <p className="empty-copy">No personal capabilities are scoped to this origin.</p>}
+          </section>
+        </>
+      )}
+
+      {section === 'teach' && (
+        <section className="bridge-card">
+          <div className="bridge-heading">
+            <span className="number">02</span>
+            <div><h2>Teach a workflow</h2><p>Demonstrate a repeated task in the visible page.</p></div>
           </div>
-        </div>
+          <div className="empty-state">
+            <strong>Recorder not active yet</strong>
+            <p>The panel route is ready. Interaction capture and sensitive-field filtering are implemented in Step 7.</p>
+          </div>
+          <button className="primary-button" type="button" disabled>Start teaching</button>
+        </section>
+      )}
 
-        <dl>
-          <div><dt>Page API</dt><dd>{status.supported ? 'Detected' : 'Not detected'}</dd></div>
-          <div><dt>Tool</dt><dd>{status.toolName ?? 'personal_ping'}</dd></div>
-          <div><dt>Registration</dt><dd>{status.registered ? 'Active' : 'Inactive'}</dd></div>
-        </dl>
+      {section === 'tools' && (
+        <section className="section-block flush">
+          <div className="section-heading">
+            <div><p className="overline">WEBSITE-OWNED</p><h2>Native tools · {nativeTools.length}</h2></div>
+          </div>
+          {nativeTools.length > 0
+            ? nativeTools.map((tool) => <DiscoveredToolCard tool={tool} key={`${tool.origin}:${tool.name}`} />)
+            : <p className="empty-copy">This page currently exposes no native WebMCP tools.</p>}
 
-        {status.error && <p className="error" role="alert">{status.error}</p>}
+          <div className="section-heading divided">
+            <div><p className="overline">USER-OWNED</p><h2>Personal tools · {snapshot.personalTools.length}</h2></div>
+          </div>
+          {snapshot.personalTools.map((tool) => <PersonalToolCard tool={tool} key={tool.id} />)}
+          {snapshot.personalTools.length === 0 && (
+            <p className="empty-copy">No saved personal tools match this origin.</p>
+          )}
+          {registeredPersonalTools.length !== snapshot.personalTools.length && (
+            <p className="hint">Registered and stored counts may briefly differ while the page catalog refreshes.</p>
+          )}
+        </section>
+      )}
 
-        <button className="test-button" type="button" onClick={runSelfTest} disabled={!status.registered || busy}>
-          {busy ? 'Running…' : 'Run connection check'}
-        </button>
-      </section>
+      {section === 'activity' && (
+        <section className="section-block flush">
+          <div className="section-heading">
+            <div><p className="overline">LOCAL RECEIPTS</p><h2>Recent activity · {snapshot.receipts.length}</h2></div>
+            {snapshot.receipts.length > 0 && (
+              <button className="text-button danger-button" type="button" onClick={clearActivity} disabled={busy}>
+                Clear
+              </button>
+            )}
+          </div>
+          {snapshot.receipts.length > 0
+            ? snapshot.receipts.map((receipt) => <ReceiptRow receipt={receipt} key={receipt.id} />)
+            : <p className="empty-copy">Successful and failed tool runs will appear here.</p>}
+        </section>
+      )}
+
+      {section === 'repair' && (
+        <section className="section-block flush">
+          <div className="section-heading">
+            <div><p className="overline">HEALTH</p><h2>Capability repair</h2></div>
+          </div>
+          {snapshot.personalTools.map((tool) => (
+            <article className="health-row" key={tool.id}>
+              <span className={`health-dot ${tool.health.state.toLowerCase()}`} />
+              <div><strong>{tool.title}</strong><p>{tool.health.state.replaceAll('_', ' ')}</p></div>
+              <span>{tool.health.confidence ?? '—'}{tool.health.confidence !== undefined ? '%' : ''}</span>
+            </article>
+          ))}
+          <p className="hint">Repair proposals and revision restore controls arrive with semantic execution in Step 9.</p>
+        </section>
+      )}
 
       <p className="hint">
-        Open <code>http://localhost:3000</code> in WebMCP-enabled Chrome, then reload this panel.
+        Tool metadata stays local. Site access is granted one origin at a time.
       </p>
     </main>
   );

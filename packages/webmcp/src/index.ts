@@ -1,3 +1,5 @@
+import type { DiscoveredWebMcpTool } from '@personal-webmcp/contracts';
+
 const PERSONAL_PING_TOOL_NAME = 'personal_ping';
 
 export interface PingToolResult {
@@ -9,9 +11,14 @@ export interface PingToolResult {
 
 interface RegisteredToolLike {
   name: string;
+  title?: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  annotations?: { readOnlyHint?: boolean; untrustedContentHint?: boolean };
+  origin?: string;
 }
 
-interface ModelContextLike {
+interface ModelContextLike extends EventTarget {
   registerTool: (
     tool: {
       name: string;
@@ -26,10 +33,12 @@ interface ModelContextLike {
   getTools: () => Promise<RegisteredToolLike[]>;
   executeTool: (
     tool: RegisteredToolLike,
-    input?: string,
+    input?: Record<string, unknown> | string,
     options?: { signal?: AbortSignal },
   ) => Promise<unknown>;
 }
+
+let executionInputMode: 'object' | 'json-string' | undefined;
 
 function getModelContext(): ModelContextLike | undefined {
   return (document as Document & { modelContext?: ModelContextLike }).modelContext;
@@ -37,6 +46,41 @@ function getModelContext(): ModelContextLike | undefined {
 
 export function isWebMcpSupported(): boolean {
   return typeof getModelContext()?.registerTool === 'function';
+}
+
+function cloneSerializableRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function discoverWebMcpTools(): Promise<DiscoveredWebMcpTool[]> {
+  const modelContext = getModelContext();
+  if (!modelContext) return [];
+
+  const tools = await modelContext.getTools();
+  return tools.map((tool): DiscoveredWebMcpTool => ({
+    name: tool.name,
+    title: tool.title || tool.name,
+    description: tool.description || 'No description provided.',
+    inputSchema: cloneSerializableRecord(tool.inputSchema),
+    annotations: tool.annotations ? {
+      readOnlyHint: tool.annotations.readOnlyHint,
+      untrustedContentHint: tool.annotations.untrustedContentHint,
+    } : undefined,
+    origin: tool.origin || window.location.origin,
+    provenance: tool.name.startsWith('personal_') ? 'PERSONAL' : 'NATIVE',
+  })).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function watchWebMcpToolChanges(listener: () => void): () => void {
+  const modelContext = getModelContext();
+  if (!modelContext) return () => undefined;
+  modelContext.addEventListener('toolchange', listener);
+  return () => modelContext.removeEventListener('toolchange', listener);
 }
 
 export async function registerPersonalPing(signal: AbortSignal): Promise<boolean> {
@@ -81,7 +125,28 @@ export async function executePersonalPing(signal?: AbortSignal): Promise<unknown
   const tool = tools.find((candidate) => candidate.name === PERSONAL_PING_TOOL_NAME);
   if (!tool) throw new Error(`${PERSONAL_PING_TOOL_NAME} is not registered.`);
 
-  return modelContext.executeTool(tool, '{}', { signal });
+  const options = signal ? { signal } : undefined;
+  if (executionInputMode === 'json-string') {
+    return modelContext.executeTool(tool, '{}', options);
+  }
+
+  try {
+    const result = await modelContext.executeTool(tool, {}, options);
+    executionInputMode = 'object';
+    return result;
+  } catch (objectInputError) {
+    if (executionInputMode === 'object') throw objectInputError;
+
+    // The connection check is deliberately read-only, so it is safe to probe
+    // the older Chrome JSON-string input shape once for this page session.
+    try {
+      const result = await modelContext.executeTool(tool, '{}', options);
+      executionInputMode = 'json-string';
+      return result;
+    } catch {
+      throw objectInputError;
+    }
+  }
 }
 
 export { PERSONAL_PING_TOOL_NAME };
