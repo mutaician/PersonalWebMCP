@@ -1,18 +1,9 @@
+import { DemoHeader } from './components/demo-header';
+
 export default function Home() {
   return (
     <main>
-      <header className="site-header">
-        <a className="brand" href="/" aria-label="PersonalWebMCP home">
-          <span className="brand-mark" aria-hidden="true">P</span>
-          <span>PersonalWebMCP</span>
-        </a>
-        <nav aria-label="Demo navigation">
-          <a href="#how-it-works">Legacy portal</a>
-          <a href="#how-it-works">Native tools</a>
-          <a href="#how-it-works">Hybrid workflow</a>
-        </nav>
-        <span className="status-pill">Local build</span>
-      </header>
+      <DemoHeader productName="PersonalWebMCP" />
 
       <section className="hero">
         <div className="hero-copy">
@@ -23,8 +14,8 @@ export default function Home() {
             and PersonalWebMCP turns it into a typed capability your agent can use.
           </p>
           <div className="hero-actions">
-            <a className="primary-action" href="#how-it-works">Teach a workflow</a>
-            <a className="secondary-action" href="#how-it-works">See how it works</a>
+            <a className="primary-action" href="/legacy">Open legacy demo</a>
+            <a className="secondary-action" href="#controlled-demos">Explore all demos</a>
           </div>
           <dl className="proof-row">
             <div><dt>Legacy sites</dt><dd>Teach missing actions</dd></div>
@@ -64,6 +55,34 @@ export default function Home() {
         <span>01</span><p><strong>Demonstrate</strong> a workflow in the visible site.</p>
         <span>02</span><p><strong>Compile</strong> it into a named, typed capability.</p>
         <span>03</span><p><strong>Invoke</strong> it through WebMCP whenever you return.</p>
+      </section>
+
+      <section className="demo-directory" id="controlled-demos">
+        <div className="directory-heading">
+          <p className="eyebrow">Controlled environments</p>
+          <h2>Three sites. One capability layer.</h2>
+          <p>Every route uses fictional, deterministic data and resets to a known starting state.</p>
+        </div>
+        <div className="demo-grid">
+          <a className="demo-card legacy" href="/legacy">
+            <span>01 · NO NATIVE TOOLS</span>
+            <h3>Supplier Portal</h3>
+            <p>Teach a missing invoice workflow on a realistic legacy interface.</p>
+            <strong>Open portal →</strong>
+          </a>
+          <a className="demo-card configurator" href="/configurator">
+            <span>02 · NATIVE FOUNDATION</span>
+            <h3>Forma Configurator</h3>
+            <p>Build a preferred desk from fine-grained site capabilities.</p>
+            <strong>Open configurator →</strong>
+          </a>
+          <a className="demo-card travel" href="/travel">
+            <span>03 · HYBRID FOUNDATION</span>
+            <h3>Wayfinder Travel</h3>
+            <p>Combine native trip search with personal interface preferences.</p>
+            <strong>Open travel →</strong>
+          </a>
+        </div>
       </section>
     </main>
   );
