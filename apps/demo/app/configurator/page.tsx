@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type CSSProperties } from 'react';
+import { useMemo, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
 import { DemoDeveloperPanel } from '../components/demo-developer-panel';
 import { resetDemoDeveloperState } from '../components/developer-events';
 import {
@@ -29,6 +29,7 @@ export default function ConfiguratorPage() {
   const [quantity, setQuantity] = useState(defaults.quantity);
   const [angle, setAngle] = useState(defaults.angle);
   const [notice, setNotice] = useState('');
+  const dragState = useRef<{ pointerId: number; startX: number; startAngle: number } | null>(null);
 
   const selectedProduct = configuratorProducts.find((item) => item.id === product) ?? configuratorProducts[0];
   const selectedSize = configuratorSizes.find((item) => item.id === size) ?? configuratorSizes[0];
@@ -56,6 +57,23 @@ export default function ConfiguratorPage() {
     setAngle(defaults.angle);
     setNotice('Configuration restored');
     resetDemoDeveloperState();
+  };
+
+  const startSceneDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('button, input, a')) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragState.current = { pointerId: event.pointerId, startX: event.clientX, startAngle: angle };
+  };
+
+  const dragScene = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const nextAngle = drag.startAngle + (event.clientX - drag.startX) * 0.18;
+    setAngle(Math.max(-36, Math.min(28, nextAngle)));
+  };
+
+  const endSceneDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (dragState.current?.pointerId === event.pointerId) dragState.current = null;
   };
 
   const sceneStyle = {
@@ -87,34 +105,53 @@ export default function ConfiguratorPage() {
             <button type="button" onClick={() => setAngle(defaults.angle)}>Front</button>
           </div>
 
-          <div className="forma-scene" aria-label={selectedSize.label + ' ' + selectedFinish.label + ' ' + selectedProduct.name}>
+          <div
+            className="forma-scene"
+            aria-label={selectedSize.label + ' ' + selectedFinish.label + ' ' + selectedProduct.name + '. Drag to rotate.'}
+            onPointerDown={startSceneDrag}
+            onPointerMove={dragScene}
+            onPointerUp={endSceneDrag}
+            onPointerCancel={endSceneDrag}
+          >
             <div className={'furniture-scene product-' + product}>
-              <div className="furniture-top"><i className="top-face" /><i className="front-face" /><i className="side-face" /></div>
+              <div className="furniture-model">
+                <div className="furniture-top">
+                  <i className="top-face" />
+                  <i className="underside-face" />
+                  <i className="front-face" />
+                  <i className="back-face" />
+                  <i className="side-face" />
+                  <i className="other-side-face" />
+                </div>
 
-              {product === 'focus-desk' && <>
-                <div className="frame-leg focus-left"><i /><b /></div>
-                <div className="frame-leg focus-right"><i /><b /></div>
-                <div className="crossbar" />
-              </>}
+                {product === 'focus-desk' && <>
+                  <div className="frame-leg focus-left"><i /><b /><em /></div>
+                  <div className="frame-leg focus-right"><i /><b /><em /></div>
+                  <div className="support-rail support-left" />
+                  <div className="support-rail support-right" />
+                  <div className="crossbar" />
+                </>}
 
-              {product === 'studio-table' && <>
-                <div className="trestle trestle-left"><i /><b /><em /></div>
-                <div className="trestle trestle-right"><i /><b /><em /></div>
-                <div className="studio-beam" />
-                <div className="studio-rail" />
-              </>}
+                {product === 'studio-table' && <>
+                  <div className="trestle trestle-left"><i /><b /><em /></div>
+                  <div className="trestle trestle-right"><i /><b /><em /></div>
+                  <div className="studio-beam" />
+                  <div className="studio-rail" />
+                </>}
 
-              {product === 'compact-console' && <>
-                <div className="console-cabinet"><i /><b /><em /></div>
-                <div className="console-panel-leg" />
-                <div className="console-cubby" />
-              </>}
+                {product === 'compact-console' && <>
+                  <div className="console-cabinet"><i /><b /><em /></div>
+                  <div className="console-panel-leg" />
+                  <div className="console-cubby" />
+                </>}
 
-              {options.includes('monitor-shelf') && <div className="scene-monitor-shelf"><i /><b /></div>}
-              {options.includes('drawer') && <div className="scene-drawer"><span /></div>}
-              {options.includes('cable-tray') && <div className="scene-cable-tray" />}
+                {options.includes('monitor-shelf') && <div className="scene-monitor-shelf"><i /><b /></div>}
+                {options.includes('drawer') && <div className="scene-drawer"><span /></div>}
+                {options.includes('cable-tray') && <div className="scene-cable-tray" />}
+              </div>
             </div>
             <div className="scene-shadow" />
+            <div className="scene-prompt"><span>↔</span> Drag to rotate</div>
           </div>
 
           <div className="forma-dimensions"><span>{selectedSize.label} width</span><span>{selectedProduct.depth} cm depth</span><span>74 cm height</span></div>
