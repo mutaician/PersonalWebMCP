@@ -1,0 +1,16 @@
+node_modules/
+.pnpm-store/
+dist/
+.output/
+.wxt/
+coverage/
+playwright-report/
+test-results/
+.wrangler/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+.temp/
