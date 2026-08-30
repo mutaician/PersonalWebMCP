@@ -1,0 +1,17 @@
+{
+  "name": "personal-webmcp",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.5.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @personal-webmcp/demo --filter @personal-webmcp/extension dev",
+    "dev:demo": "pnpm --filter @personal-webmcp/demo dev",
+    "dev:extension": "pnpm --filter @personal-webmcp/extension dev",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "zip:extension": "pnpm --filter @personal-webmcp/extension zip"
+  }
+}
