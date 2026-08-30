@@ -50,14 +50,17 @@ export default defineContentScript({
 
       if (event.data.type === 'PING_RESULT') {
         const payload = event.data.payload as PingResultPayload;
-        void browser.runtime.sendMessage({
-          type: 'WEBMCP_STATUS',
-          payload: {
-            ...currentStatus,
-            error: payload.ok ? undefined : payload.error,
-            updatedAt: Date.now(),
-          },
-        });
+        void Promise.all([
+          browser.runtime.sendMessage({ type: 'WEBMCP_PING_RESULT', payload }),
+          browser.runtime.sendMessage({
+            type: 'WEBMCP_STATUS',
+            payload: {
+              ...currentStatus,
+              error: payload.ok ? undefined : payload.error,
+              updatedAt: Date.now(),
+            },
+          }),
+        ]);
       }
     };
 
