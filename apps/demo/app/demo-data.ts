@@ -25,6 +25,23 @@ export const demoInvoices: DemoInvoice[] = [
   { id: 'INV-1966', vendor: 'Cobalt Safety Group', issuedAt: '2026-05-21', dueAt: '2026-06-20', amount: 1460, status: 'Paid', reference: 'Inspection supplies' },
 ];
 
+export const invoiceWorkflowPostconditions = {
+  filterResults: {
+    statusMatchesSelection: true,
+    vendorMatchesSelection: true,
+    amountIsAtLeastMinimum: true,
+    textMatchesInvoiceVendorOrReference: true,
+    defaultOrder: 'issuedAt descending',
+  },
+  invoiceDetail: {
+    routePattern: '/legacy/invoices/:invoiceId',
+    headingMatchesInvoiceId: true,
+    vendorMatchesSelectedRecord: true,
+    amountMatchesSelectedRecord: true,
+    statusMatchesSelectedRecord: true,
+  },
+} as const;
+
 export const configuratorProducts = [
   { id: 'focus-desk', name: 'Focus Desk', subtitle: 'Airy A-frame workstation', depth: 70, basePrice: 640 },
   { id: 'studio-table', name: 'Studio Workbench', subtitle: 'Deep top with trestle base', depth: 82, basePrice: 780 },
