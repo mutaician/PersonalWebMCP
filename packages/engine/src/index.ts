@@ -4,3 +4,5 @@ export type {
   WorkflowNode,
   WorkflowNodeType,
 } from '@personal-webmcp/contracts';
+
+export * from './compiler';

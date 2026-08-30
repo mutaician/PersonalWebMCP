@@ -5,13 +5,21 @@ import {
   type BridgeEnvelope,
   type PingResultPayload,
   type TabCapabilityStatus,
+  type TeachSessionSnapshot,
   type ToolCatalogPayload,
   type WebMcpStatusPayload,
 } from '@personal-webmcp/contracts';
+import { InteractionRecorder } from '../lib/teaching/recorder';
 
 type ContentMessage =
   | { type: 'GET_STATUS' }
   | { type: 'GET_CATALOG' }
+  | { type: 'GET_TEACH_SESSION' }
+  | { type: 'START_TEACHING' }
+  | { type: 'PAUSE_TEACHING' }
+  | { type: 'RESUME_TEACHING' }
+  | { type: 'CANCEL_TEACHING' }
+  | { type: 'FINISH_TEACHING' }
   | { type: 'REFRESH_CATALOG' }
   | { type: 'RUN_PING_SELF_TEST' };
 
@@ -34,6 +42,26 @@ export default defineContentScript({
       tools: [],
     };
     let currentUrl = window.location.href;
+    const recorder = new InteractionRecorder((snapshot) => {
+      void browser.runtime.sendMessage({ type: 'TEACH_STATE_UPDATED', payload: snapshot }).catch(() => undefined);
+    });
+
+    try {
+      const storedSession = await browser.runtime.sendMessage({ type: 'GET_TEACH_SESSION' }) as TeachSessionSnapshot | undefined;
+      if (storedSession && storedSession.state !== 'IDLE') {
+        recorder.restore(storedSession);
+        const lastRecordedPath = [...(storedSession.trace?.steps ?? [])].reverse().find((step) => step.locator)?.locator?.path
+          ?? storedSession.trace?.path;
+        if (['RECORDING', 'PAUSED'].includes(storedSession.state) && lastRecordedPath !== window.location.pathname) {
+          recorder.recordNavigation(
+            `${window.location.origin}${lastRecordedPath ?? ''}`,
+            window.location.href,
+          );
+        }
+      }
+    } catch {
+      // Recording can still start normally if no prior tab session exists.
+    }
 
     const postCommand = (type: 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING') => {
       const envelope: BridgeEnvelope = {
@@ -87,13 +115,21 @@ export default defineContentScript({
 
     const navigationTimer = window.setInterval(() => {
       if (window.location.href === currentUrl) return;
+      const previousUrl = currentUrl;
       currentUrl = window.location.href;
+      recorder.recordNavigation(previousUrl, currentUrl);
       postCommand('REFRESH_CATALOG');
     }, 500);
 
     browser.runtime.onMessage.addListener((message: ContentMessage) => {
       if (message.type === 'GET_STATUS') return Promise.resolve(currentStatus);
       if (message.type === 'GET_CATALOG') return Promise.resolve(currentCatalog);
+      if (message.type === 'GET_TEACH_SESSION') return Promise.resolve(recorder.getSnapshot());
+      if (message.type === 'START_TEACHING') return Promise.resolve(recorder.start());
+      if (message.type === 'PAUSE_TEACHING') return Promise.resolve(recorder.pause());
+      if (message.type === 'RESUME_TEACHING') return Promise.resolve(recorder.resume());
+      if (message.type === 'CANCEL_TEACHING') return Promise.resolve(recorder.cancel());
+      if (message.type === 'FINISH_TEACHING') return Promise.resolve(recorder.finish());
       if (message.type === 'REFRESH_CATALOG') {
         postCommand('REFRESH_CATALOG');
         return Promise.resolve({ accepted: true });
@@ -107,6 +143,7 @@ export default defineContentScript({
 
     window.addEventListener('pagehide', () => {
       window.clearInterval(navigationTimer);
+      recorder.dispose();
       postCommand('WITHDRAW_PING');
     }, { once: true });
   },

@@ -1,9 +1,13 @@
 import type {
   ActiveTabSnapshot,
+  PersonalToolRecord,
   PingResultPayload,
   TabCapabilityStatus,
+  TeachSessionSnapshot,
   ToolCatalogPayload,
+  ToolRevision,
 } from '@personal-webmcp/contracts';
+import { assertPersonalTool, createIdleTeachSession } from '@personal-webmcp/contracts';
 import {
   activityReceiptRepository,
   bootstrapPersistence,
@@ -11,12 +15,23 @@ import {
   savePingReceipt,
   settingsRepository,
   toolRegistryRepository,
+  traceRepository,
+  revisionRepository,
 } from '../lib/storage';
 
 type ExtensionMessage =
   | { type: 'WEBMCP_STATUS'; payload: TabCapabilityStatus }
   | { type: 'WEBMCP_CATALOG'; payload: ToolCatalogPayload }
   | { type: 'WEBMCP_PING_RESULT'; payload: PingResultPayload }
+  | { type: 'TEACH_STATE_UPDATED'; payload: TeachSessionSnapshot }
+  | { type: 'GET_TEACH_SESSION' }
+  | { type: 'START_TEACHING' }
+  | { type: 'PAUSE_TEACHING' }
+  | { type: 'RESUME_TEACHING' }
+  | { type: 'CANCEL_TEACHING' }
+  | { type: 'FINISH_TEACHING' }
+  | { type: 'TEST_COMPILED_TOOL'; tool: PersonalToolRecord }
+  | { type: 'SAVE_COMPILED_TOOL'; tool: PersonalToolRecord }
   | { type: 'GET_ACTIVE_STATUS' }
   | { type: 'GET_PANEL_SNAPSHOT' }
   | { type: 'RUN_PING_SELF_TEST' }
@@ -96,6 +111,7 @@ export default defineBackground(() => {
   const statusByTab = new Map<number, TabCapabilityStatus>();
   const catalogByTab = new Map<number, ToolCatalogPayload>();
   const pingStartedAtByTab = new Map<number, number>();
+  const teachSessionByTab = new Map<number, TeachSessionSnapshot>();
   const persistenceReady = bootstrapPersistence();
 
   void persistenceReady.then(async () => {
@@ -154,6 +170,9 @@ export default defineBackground(() => {
       catalog,
       personalTools: personalTools.filter((tool) => !origin || tool.scope.origin === origin),
       receipts: receipts.filter((receipt) => !origin || receipt.origin === origin).slice(0, 25),
+      teachSession: tab?.id === undefined
+        ? createIdleTeachSession()
+        : teachSessionByTab.get(tab.id) ?? createIdleTeachSession(),
       enabled,
       origin,
       path: url?.pathname,
@@ -185,6 +204,19 @@ export default defineBackground(() => {
       return { saved: true };
     }
 
+    if (message.type === 'TEACH_STATE_UPDATED' && sender.tab?.id !== undefined) {
+      teachSessionByTab.set(sender.tab.id, structuredClone(message.payload));
+      void browser.runtime.sendMessage({ type: 'TEACH_STATE_CHANGED' }).catch(() => undefined);
+      return { saved: true };
+    }
+
+    if (message.type === 'GET_TEACH_SESSION') {
+      const tabId = sender.tab?.id ?? (await getActiveTab())?.id;
+      return tabId === undefined
+        ? createIdleTeachSession()
+        : teachSessionByTab.get(tabId) ?? createIdleTeachSession();
+    }
+
     if (message.type === 'GET_PERSISTENCE_SUMMARY') {
       await persistenceReady;
       return getPersistenceSummary();
@@ -192,6 +224,54 @@ export default defineBackground(() => {
 
     if (message.type === 'GET_PANEL_SNAPSHOT') {
       return getPanelSnapshot();
+    }
+
+    if (['START_TEACHING', 'PAUSE_TEACHING', 'RESUME_TEACHING', 'CANCEL_TEACHING', 'FINISH_TEACHING'].includes(message.type)) {
+      await persistenceReady;
+      const activeTab = await getActiveTab();
+      if (activeTab?.id === undefined) throw new Error('Open a permitted page before teaching.');
+      const session = await browser.tabs.sendMessage(activeTab.id, { type: message.type }) as TeachSessionSnapshot;
+
+      if (message.type === 'CANCEL_TEACHING') {
+        if (session.trace?.status === 'CANCELLED') await traceRepository.save(session.trace);
+        const idle = createIdleTeachSession();
+        teachSessionByTab.set(activeTab.id, idle);
+        return idle;
+      }
+
+      teachSessionByTab.set(activeTab.id, structuredClone(session));
+      if (message.type === 'FINISH_TEACHING' && session.trace?.status === 'COMPLETED') {
+        await traceRepository.save(session.trace);
+      }
+      return session;
+    }
+
+    if (message.type === 'TEST_COMPILED_TOOL' || message.type === 'SAVE_COMPILED_TOOL') {
+      await persistenceReady;
+      assertPersonalTool(message.tool);
+      const activeTab = await getActiveTab();
+      const activeOrigin = getOrigin(activeTab?.url);
+      if (activeOrigin !== message.tool.scope.origin) {
+        throw new Error('The tool scope does not match the active page origin.');
+      }
+      if (message.tool.inputSchema.additionalProperties !== false) {
+        throw new Error('The generated schema must reject undeclared inputs.');
+      }
+      if (message.type === 'TEST_COMPILED_TOOL') {
+        return { valid: true, message: 'Contract, schema, scope and workflow graph are valid.' };
+      }
+
+      await toolRegistryRepository.save(message.tool);
+      const revision: ToolRevision = {
+        id: crypto.randomUUID(),
+        toolId: message.tool.id,
+        toolVersion: message.tool.version,
+        createdAt: new Date().toISOString(),
+        reason: 'CREATED',
+        snapshot: structuredClone(message.tool),
+      };
+      await revisionRepository.save(revision);
+      return { saved: true, toolId: message.tool.id, revisionId: revision.id };
     }
 
     if (message.type === 'CLEAR_ACTIVITY_HISTORY') {
@@ -257,5 +337,6 @@ export default defineBackground(() => {
     statusByTab.delete(tabId);
     catalogByTab.delete(tabId);
     pingStartedAtByTab.delete(tabId);
+    teachSessionByTab.delete(tabId);
   });
 });

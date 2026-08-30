@@ -72,6 +72,7 @@ export interface ActiveTabSnapshot {
   catalog: ToolCatalogPayload;
   personalTools: import('./models').PersonalToolRecord[];
   receipts: import('./models').ActivityReceipt[];
+  teachSession: import('./models').TeachSessionSnapshot;
   enabled: boolean;
   origin?: string;
   path?: string;

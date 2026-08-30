@@ -136,6 +136,23 @@ export interface InteractionTrace {
   steps: TraceStep[];
 }
 
+export type TeachRecorderState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'REVIEW';
+
+export interface TeachSessionSnapshot {
+  state: TeachRecorderState;
+  trace?: InteractionTrace;
+  sensitiveSkipCount: number;
+  updatedAt: string;
+}
+
+export function createIdleTeachSession(now = new Date().toISOString()): TeachSessionSnapshot {
+  return {
+    state: 'IDLE',
+    sensitiveSkipCount: 0,
+    updatedAt: now,
+  };
+}
+
 export type RevisionReason = 'CREATED' | 'EDITED' | 'AUTO_REPAIR' | 'APPROVED_REPAIR' | 'RESTORED';
 
 export interface ToolRevision {

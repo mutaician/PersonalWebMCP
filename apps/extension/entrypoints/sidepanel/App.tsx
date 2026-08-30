@@ -7,6 +7,8 @@ import type {
   TabCapabilityStatus,
   ToolCatalogPayload,
 } from '@personal-webmcp/contracts';
+import { createIdleTeachSession } from '@personal-webmcp/contracts';
+import { TeachPanel } from './teach-panel';
 
 type PanelSection = 'overview' | 'teach' | 'tools' | 'activity' | 'repair';
 
@@ -38,6 +40,7 @@ const emptySnapshot: ActiveTabSnapshot = {
   catalog: emptyCatalog,
   personalTools: [],
   receipts: [],
+  teachSession: createIdleTeachSession(),
   enabled: false,
 };
 
@@ -77,6 +80,7 @@ function PersonalToolCard({ tool }: { tool: PersonalToolRecord }) {
       <dl className="compact-list">
         <div><dt>Scope</dt><dd>{tool.scope.origin}</dd></div>
         <div><dt>Version</dt><dd>{tool.version}</dd></div>
+        <div><dt>Workflow nodes</dt><dd>{tool.workflowGraph.nodes.length}</dd></div>
         <div><dt>Health</dt><dd>{tool.health.state.replaceAll('_', ' ')}</dd></div>
       </dl>
       <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
@@ -116,7 +120,7 @@ export default function App() {
     void refresh();
     const intervalId = window.setInterval(() => void refresh(), 1500);
     const onMessage = (message: { type?: string }) => {
-      if (message.type === 'WEBMCP_STATUS' || message.type === 'WEBMCP_CATALOG') void refresh();
+      if (message.type === 'WEBMCP_STATUS' || message.type === 'WEBMCP_CATALOG' || message.type === 'TEACH_STATE_CHANGED') void refresh();
     };
     browser.runtime.onMessage.addListener(onMessage);
     return () => {
@@ -286,17 +290,12 @@ export default function App() {
       )}
 
       {section === 'teach' && (
-        <section className="bridge-card">
-          <div className="bridge-heading">
-            <span className="number">02</span>
-            <div><h2>Teach a workflow</h2><p>Demonstrate a repeated task in the visible page.</p></div>
-          </div>
-          <div className="empty-state">
-            <strong>Recorder not active yet</strong>
-            <p>The panel route is ready. Interaction capture and sensitive-field filtering are implemented in Step 7.</p>
-          </div>
-          <button className="primary-button" type="button" disabled>Start teaching</button>
-        </section>
+        <TeachPanel
+          session={snapshot.teachSession}
+          enabled={snapshot.enabled}
+          onSessionChange={(teachSession) => setSnapshot((current) => ({ ...current, teachSession }))}
+          onSaved={async () => { await refresh(); setSection('tools'); }}
+        />
       )}
 
       {section === 'tools' && (
