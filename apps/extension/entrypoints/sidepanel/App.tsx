@@ -78,6 +78,7 @@ interface PersonalToolCardProps {
   execution?: ToolExecutionState;
   onRun: (tool: PersonalToolRecord, input: Record<string, JsonValue>) => Promise<void>;
   onCancel: (invocationId: string) => Promise<void>;
+  onConfirm: (invocationId: string, approved: boolean) => Promise<void>;
   onDelete: (tool: PersonalToolRecord) => Promise<void>;
 }
 
@@ -96,14 +97,15 @@ function resultMessage(result: JsonValue | undefined): string | undefined {
   return typeof result.message === 'string' ? result.message : undefined;
 }
 
-function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onDelete }: PersonalToolCardProps) {
+function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onConfirm, onDelete }: PersonalToolCardProps) {
   const properties = schemaProperties(tool);
   const required = new Set(Array.isArray(tool.inputSchema.required) ? tool.inputSchema.required.filter((name): name is string => typeof name === 'string') : []);
   const [values, setValues] = useState<Record<string, string | boolean>>(() => Object.fromEntries(
     Object.entries(properties).map(([name, schema]) => [name, typeof schema.default === 'boolean' ? schema.default : String(schema.default ?? '')]),
   ));
   const [localError, setLocalError] = useState('');
-  const running = execution?.status === 'RUNNING';
+  const running = execution?.status === 'RUNNING' || execution?.status === 'AWAITING_CONFIRMATION';
+  const awaitingConfirmation = execution?.status === 'AWAITING_CONFIRMATION';
   const fixedPreferences = tool.workflowGraph.nodes.filter((node) => node.config.valueSource === 'FIXED' && node.config.value !== undefined);
 
   const submit = async () => {
@@ -179,10 +181,18 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onDele
         <button className="primary-button" type="button" onClick={() => void submit()} disabled={!registered || running}>
           {running ? 'Running visible steps…' : 'Run on visible page'}
         </button>
-        {running && execution && (
+        {execution?.status === 'RUNNING' && (
           <button className="cancel-button" type="button" onClick={() => void onCancel(execution.invocationId)}>Cancel</button>
         )}
       </div>
+      {awaitingConfirmation && execution?.confirmation && (
+        <div className="confirmation-card" role="alert">
+          <span>HUMAN CHECKPOINT</span>
+          <strong>{execution.confirmation.label}</strong>
+          <p>{execution.confirmation.summary}</p>
+          <div><button type="button" onClick={() => void onConfirm(execution.invocationId, false)}>Reject</button><button className="primary-button" type="button" onClick={() => void onConfirm(execution.invocationId, true)}>Approve and continue</button></div>
+        </div>
+      )}
       {!registered && <p className="runner-note">Open this tool’s starting page in a WebMCP-enabled Chrome tab to run it.</p>}
       {execution && execution.status !== 'RUNNING' && (
         <p className={`run-result ${execution.status.toLowerCase()}`}>
@@ -325,6 +335,16 @@ export default function App() {
     setActionError('');
     await browser.runtime.sendMessage({ type: 'CANCEL_PERSONAL_TOOL', invocationId });
     window.setTimeout(() => void refresh(), 150);
+  };
+
+  const resolveHumanConfirmation = async (invocationId: string, approved: boolean) => {
+    setActionError('');
+    try {
+      await browser.runtime.sendMessage({ type: 'RESOLVE_HUMAN_CONFIRMATION', invocationId, approved });
+      window.setTimeout(() => void refresh(), 150);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not record the confirmation decision.');
+    }
   };
 
   const deletePersonalTool = async (tool: PersonalToolRecord) => {
@@ -512,6 +532,7 @@ export default function App() {
                   execution={snapshot.activeExecution?.toolId === tool.id ? snapshot.activeExecution : undefined}
                   onRun={runPersonalTool}
                   onCancel={cancelPersonalTool}
+                  onConfirm={resolveHumanConfirmation}
                   onDelete={deletePersonalTool}
                   key={tool.id}
                 />
@@ -552,6 +573,7 @@ export default function App() {
               execution={snapshot.activeExecution?.toolId === tool.id ? snapshot.activeExecution : undefined}
               onRun={runPersonalTool}
               onCancel={cancelPersonalTool}
+              onConfirm={resolveHumanConfirmation}
               onDelete={deletePersonalTool}
               key={tool.id}
             />

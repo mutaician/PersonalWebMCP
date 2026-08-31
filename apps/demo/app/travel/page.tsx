@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { DemoDeveloperPanel } from '../components/demo-developer-panel';
 import { resetDemoDeveloperState } from '../components/developer-events';
 import { demoAirports, demoTrips, type DemoAirport, type DemoTrip } from '../demo-data';
+import { useTravelWebMcp } from './use-travel-webmcp';
 
 const defaultFrom = demoAirports.find((airport) => airport.code === 'NBO') ?? demoAirports[0];
 const defaultTo = demoAirports.find((airport) => airport.code === 'LIS') ?? demoAirports[1];
@@ -82,6 +83,31 @@ export default function TravelPage() {
   const [stops, setStops] = useState<'any' | 'one'>('any');
   const [maxPrice, setMaxPrice] = useState(800);
   const [fare, setFare] = useState<'Light' | 'Standard' | 'Flex'>('Standard');
+
+  const searchFromTool = useCallback((input: {
+    from: DemoAirport;
+    to: DemoAirport;
+    departure: string;
+    returnDate?: string;
+    travelers: number;
+    cabin: string;
+  }) => {
+    setFrom(input.from);
+    setTo(input.to);
+    setDeparture(input.departure);
+    setReturnDate(input.returnDate ?? '');
+    setRoundTrip(Boolean(input.returnDate));
+    setTravelers(input.travelers);
+    setCabin(input.cabin);
+    setSearchedRoute({ from: input.from, to: input.to });
+    setSelected(undefined);
+    return demoTrips.map((trip) => ({ ...trip, from: input.from.city, to: input.to.city, fromCode: input.from.code, toCode: input.to.code }));
+  }, []);
+  const showTripFromTool = useCallback((trip: DemoTrip) => {
+    setSelected(trip);
+    setFare('Standard');
+  }, []);
+  useTravelWebMcp({ search: searchFromTool, showTrip: showTripFromTool });
 
   const routeTrips = useMemo(() => demoTrips.map((trip) => ({
     ...trip,

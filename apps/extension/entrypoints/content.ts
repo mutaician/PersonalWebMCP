@@ -4,6 +4,7 @@ import {
   isBridgeEnvelope,
   type BridgeEnvelope,
   type JsonValue,
+  type HumanConfirmationPrompt,
   type PersonalToolExecutionResult,
   type PersonalToolInvocationPayload,
   type PersonalToolInvocationResultPayload,
@@ -35,6 +36,7 @@ type ContentMessage =
   | { type: 'SYNC_PERSONAL_TOOLS' }
   | { type: 'EXECUTE_TOOL_WORKFLOW'; tool: PersonalToolRecord; input: Record<string, JsonValue>; invocationId: string }
   | { type: 'CANCEL_TOOL_WORKFLOW'; invocationId: string }
+  | { type: 'RESOLVE_HUMAN_CONFIRMATION'; invocationId: string; approved: boolean }
   | { type: 'START_GUIDED_REPAIR'; toolId: string; nodeId: string }
   | { type: 'CANCEL_GUIDED_REPAIR' }
   | { type: 'REFRESH_CATALOG' }
@@ -71,6 +73,10 @@ export default defineContentScript({
       resolve: (result: JsonValue) => void;
       reject: (error: Error) => void;
       timeoutId: number;
+    }>();
+    const pendingHumanConfirmations = new Map<string, {
+      resolve: () => void;
+      reject: (error: Error) => void;
     }>();
     let stopGuidedSelection: () => void = () => undefined;
     const recorder = new InteractionRecorder((snapshot) => {
@@ -255,6 +261,25 @@ export default defineContentScript({
                   input,
                 });
               }),
+              (label, summary, nodeId, signal) => new Promise<void>((resolve, reject) => {
+                signal.throwIfAborted();
+                pendingHumanConfirmations.get(message.invocationId)?.reject(new Error('A newer confirmation replaced this request.'));
+                pendingHumanConfirmations.set(message.invocationId, { resolve, reject });
+                const onAbort = () => {
+                  if (!pendingHumanConfirmations.delete(message.invocationId)) return;
+                  reject(new DOMException('Tool execution was cancelled.', 'AbortError'));
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+                void browser.runtime.sendMessage({
+                  type: 'HUMAN_CONFIRMATION_REQUESTED',
+                  invocationId: message.invocationId,
+                  prompt: { nodeId, label, summary } satisfies HumanConfirmationPrompt,
+                }).catch((error: unknown) => {
+                  signal.removeEventListener('abort', onAbort);
+                  pendingHumanConfirmations.delete(message.invocationId);
+                  reject(error instanceof Error ? error : new Error('Could not request human confirmation.'));
+                });
+              }),
             );
             return { ok: true, result };
           } catch (error) {
@@ -272,6 +297,14 @@ export default defineContentScript({
         const controller = activeExecutions.get(message.invocationId);
         controller?.abort(new DOMException('Tool execution was cancelled.', 'AbortError'));
         return Promise.resolve({ accepted: Boolean(controller) });
+      }
+      if (message.type === 'RESOLVE_HUMAN_CONFIRMATION') {
+        const pending = pendingHumanConfirmations.get(message.invocationId);
+        if (!pending) return Promise.resolve({ accepted: false });
+        pendingHumanConfirmations.delete(message.invocationId);
+        if (message.approved) pending.resolve();
+        else pending.reject(new Error('Human confirmation was rejected.'));
+        return Promise.resolve({ accepted: true });
       }
       if (message.type === 'START_GUIDED_REPAIR') {
         stopGuidedSelection();
@@ -350,6 +383,8 @@ export default defineContentScript({
         pending.reject(new Error('The page closed during native tool execution.'));
       }
       pendingNativeExecutions.clear();
+      for (const pending of pendingHumanConfirmations.values()) pending.reject(new Error('The page closed while confirmation was pending.'));
+      pendingHumanConfirmations.clear();
       stopGuidedSelection();
       recorder.dispose();
       postCommand('WITHDRAW_PING');

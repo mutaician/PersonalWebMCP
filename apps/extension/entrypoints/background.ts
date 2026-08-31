@@ -1,6 +1,7 @@
 import type {
   ActiveTabSnapshot,
   ActivityReceipt,
+  HumanConfirmationPrompt,
   JsonValue,
   LocatorRepair,
   PersonalToolExecutionResult,
@@ -49,6 +50,8 @@ type ExtensionMessage =
   | { type: 'GET_SCOPED_PERSONAL_TOOLS'; url: string; supported: boolean }
   | { type: 'RUN_PERSONAL_TOOL'; toolId: string; input: Record<string, JsonValue>; invocationId?: string }
   | { type: 'CANCEL_PERSONAL_TOOL'; invocationId: string }
+  | { type: 'HUMAN_CONFIRMATION_REQUESTED'; invocationId: string; prompt: HumanConfirmationPrompt }
+  | { type: 'RESOLVE_HUMAN_CONFIRMATION'; invocationId: string; approved: boolean }
   | { type: 'APPROVE_REPAIR'; proposalId: string; candidateIndex: number }
   | { type: 'REJECT_REPAIR'; proposalId: string }
   | { type: 'START_GUIDED_REPAIR'; proposalId: string }
@@ -187,6 +190,7 @@ export default defineBackground(() => {
   const pingStartedAtByTab = new Map<number, number>();
   const teachSessionByTab = new Map<number, TeachSessionSnapshot>();
   const executionByTab = new Map<number, ToolExecutionState>();
+  const humanDecisionByInvocation = new Map<string, boolean>();
   const persistenceReady = bootstrapPersistence();
 
   void persistenceReady.then(async () => {
@@ -396,7 +400,7 @@ export default defineBackground(() => {
         inputSummary: input,
         selectedLocators: result.selectedLocators,
         result: result as unknown as JsonValue,
-        humanDecision: 'NOT_REQUIRED',
+        humanDecision: humanDecisionByInvocation.get(invocationId) ? 'APPROVED' : 'NOT_REQUIRED',
       };
       const settings = await settingsRepository.get();
       await activityReceiptRepository.save(receipt, settings.receiptLimit);
@@ -422,6 +426,7 @@ export default defineBackground(() => {
         result: result as unknown as JsonValue,
       });
       await publishExecutionState();
+      humanDecisionByInvocation.delete(invocationId);
       return result;
     } catch (error) {
       const finishedAtMs = Date.now();
@@ -441,7 +446,7 @@ export default defineBackground(() => {
         inputSummary: input,
         selectedLocators: [],
         error: message,
-        humanDecision: 'NOT_REQUIRED',
+        humanDecision: humanDecisionByInvocation.get(invocationId) === false ? 'REJECTED' : 'NOT_REQUIRED',
       };
       const settings = await settingsRepository.get();
       await activityReceiptRepository.save(receipt, settings.receiptLimit);
@@ -456,6 +461,7 @@ export default defineBackground(() => {
         error: message,
       });
       await publishExecutionState();
+      humanDecisionByInvocation.delete(invocationId);
       throw error;
     }
   };
@@ -522,6 +528,34 @@ export default defineBackground(() => {
       const tab = sender.tab ?? await getActiveTab();
       if (!tab) throw new Error('Open the tool’s starting page before running it.');
       return runPersonalTool(tab, message.toolId, message.input ?? {}, message.invocationId);
+    }
+
+    if (message.type === 'HUMAN_CONFIRMATION_REQUESTED' && sender.tab?.id !== undefined) {
+      const execution = executionByTab.get(sender.tab.id);
+      if (!execution || execution.invocationId !== message.invocationId || execution.status !== 'RUNNING') {
+        throw new Error('The confirmation request no longer matches an active capability.');
+      }
+      executionByTab.set(sender.tab.id, { ...execution, status: 'AWAITING_CONFIRMATION', confirmation: message.prompt });
+      await publishExecutionState();
+      return { accepted: true };
+    }
+
+    if (message.type === 'RESOLVE_HUMAN_CONFIRMATION') {
+      const tab = sender.tab ?? await getActiveTab();
+      if (tab?.id === undefined) throw new Error('The page awaiting confirmation is no longer visible.');
+      const execution = executionByTab.get(tab.id);
+      if (!execution || execution.invocationId !== message.invocationId || execution.status !== 'AWAITING_CONFIRMATION') {
+        throw new Error('This confirmation request is no longer active.');
+      }
+      humanDecisionByInvocation.set(message.invocationId, message.approved);
+      if (message.approved) executionByTab.set(tab.id, { ...execution, status: 'RUNNING', confirmation: undefined });
+      await browser.tabs.sendMessage(tab.id, {
+        type: 'RESOLVE_HUMAN_CONFIRMATION',
+        invocationId: message.invocationId,
+        approved: message.approved,
+      });
+      await publishExecutionState();
+      return { accepted: true };
     }
 
     if (message.type === 'CANCEL_PERSONAL_TOOL') {

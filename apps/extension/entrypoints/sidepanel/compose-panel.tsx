@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   DiscoveredWebMcpTool,
   JsonValue,
@@ -20,6 +20,23 @@ interface CompositeStepDraft {
   tool: DiscoveredWebMcpTool;
   arguments: Record<string, ArgumentDraft>;
   personalTool?: PersonalToolRecord;
+  confirmation?: true;
+}
+
+function stepForConfirmation(origin: string): CompositeStepDraft {
+  return {
+    id: crypto.randomUUID(),
+    tool: {
+      name: 'human_confirmation',
+      title: 'Review before booking',
+      description: 'Pauses the capability until the user approves or rejects it in the side panel.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      origin,
+      provenance: 'PERSONAL',
+    },
+    arguments: {},
+    confirmation: true,
+  };
 }
 
 function propertiesFor(tool: DiscoveredWebMcpTool): Record<string, Record<string, unknown>> {
@@ -106,11 +123,22 @@ export function ComposePanel({
   const [name, setName] = useState('personal_make_my_usual');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const travelMode = useMemo(() => nativeTools.some((tool) => tool.name.startsWith('travel_')), [nativeTools]);
   const available = useMemo(() => nativeTools.filter((tool) => !steps.some((step) => step.tool.name === tool.name)), [nativeTools, steps]);
   const availablePersonal = useMemo(() => personalTools.filter((tool) => !steps.some((step) => step.tool.name === tool.webmcpName)), [personalTools, steps]);
+  const hasConfirmation = steps.some((step) => step.confirmation);
+
+  useEffect(() => {
+    if (!travelMode || steps.length > 0) return;
+    setTitle('Prepare my usual trip');
+    setName('personal_prepare_my_trip');
+  }, [steps.length, travelMode]);
 
   const addUsual = () => {
-    setSteps(nativeTools.map(stepFor));
+    setSteps([
+      ...nativeTools.map(stepFor),
+      ...(travelMode && origin ? [stepForConfirmation(origin)] : []),
+    ]);
     setMessage('');
   };
 
@@ -149,12 +177,14 @@ export function ComposePanel({
             : { mode: 'FIXED', value: argument.value };
           if (argument.mode === 'PARAMETER') properties[argument.parameterName] = { ...argument.schema, default: argument.value };
         }
-        const config: Record<string, JsonValue> = step.personalTool
+        const config: Record<string, JsonValue> = step.confirmation
+          ? { summary: 'Review the selected itinerary, fare, seat preference and shortlist state on the visible page.' }
+          : step.personalTool
           ? { toolId: step.personalTool.id, tool: step.personalTool as unknown as JsonValue, arguments: argumentsConfig }
           : { toolName: step.tool.name, arguments: argumentsConfig };
         return {
           id: `step-${index + 1}`,
-          type: step.personalTool ? 'PERSONAL_TOOL' : 'NATIVE_TOOL',
+          type: step.confirmation ? 'HUMAN_CONFIRMATION' : step.personalTool ? 'PERSONAL_TOOL' : 'NATIVE_TOOL',
           label: step.tool.title,
           config,
         };
@@ -165,10 +195,10 @@ export function ComposePanel({
         webmcpName: name.trim(),
         title: title.trim(),
         description: `Apply ${steps.length} saved steps by composing website-owned and personal WebMCP capabilities.`,
-        scope: { origin, pathRules: [{ kind: 'PREFIX', value: path || '/' }], prerequisites: ['document.modelContext', ...steps.filter((step) => !step.personalTool).map((step) => step.tool.name)] },
+        scope: { origin, pathRules: [{ kind: 'PREFIX', value: path || '/' }], prerequisites: ['document.modelContext', ...steps.filter((step) => !step.personalTool && !step.confirmation).map((step) => step.tool.name)] },
         inputSchema: { type: 'object', properties, additionalProperties: false },
-        annotations: { readOnlyHint: false, untrustedContentHint: false, riskClass: 'REVERSIBLE_WRITE' },
-        provenance: { type: 'COMPOSITE', createdAt: now, nativeDependencies: steps.filter((step) => !step.personalTool).map((step) => step.tool.name), repairHistory: [] },
+        annotations: { readOnlyHint: false, untrustedContentHint: false, riskClass: hasConfirmation ? 'CONSEQUENTIAL' : 'REVERSIBLE_WRITE' },
+        provenance: { type: 'COMPOSITE', createdAt: now, nativeDependencies: steps.filter((step) => !step.personalTool && !step.confirmation).map((step) => step.tool.name), repairHistory: [] },
         workflowGraph: {
           entryNodeId: nodes[0]!.id,
           nodes,
@@ -190,11 +220,12 @@ export function ComposePanel({
 
   return (
     <section className="compose-card">
-      <div className="section-heading"><div><p className="overline">COMPOSE</p><h2>My usual configuration</h2></div><span>{steps.length} steps</span></div>
-      <p>Combine website-owned tools into one personal capability. No DOM recording is used here.</p>
-      {steps.length === 0 && nativeTools.length > 0 && <button className="primary-button" type="button" onClick={addUsual}>Start with all configurator tools</button>}
+      <div className="section-heading"><div><p className="overline">COMPOSE</p><h2>{travelMode ? 'Prepare a personal trip' : 'My usual configuration'}</h2></div><span>{steps.length} steps</span></div>
+      <p>{travelMode ? 'Combine native trip tools with any travel preference you taught, then pause for your review.' : 'Combine website-owned tools into one personal capability. No DOM recording is used here.'}</p>
+      {steps.length === 0 && nativeTools.length > 0 && <button className="primary-button" type="button" onClick={addUsual}>{travelMode ? 'Start hybrid trip flow' : 'Start with all configurator tools'}</button>}
       <div className="compose-add-row">{available.map((tool) => <button type="button" onClick={() => setSteps((current) => [...current, stepFor(tool)])} key={tool.name}>+ {tool.title}</button>)}</div>
       {availablePersonal.length > 0 && <div className="compose-add-row personal-add-row">{availablePersonal.map((tool) => <button type="button" onClick={() => setSteps((current) => [...current, stepForPersonal(tool)])} key={tool.id}>+ Personal: {tool.title}</button>)}</div>}
+      {travelMode && !hasConfirmation && origin && <div className="compose-add-row"><button type="button" onClick={() => setSteps((current) => [...current, stepForConfirmation(origin)])}>+ Human review checkpoint</button></div>}
       <div className="compose-steps">
         {steps.map((step, index) => (
           <article className="compose-step" key={step.id}>

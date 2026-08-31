@@ -226,7 +226,13 @@ export interface ActivityReceipt {
   humanDecision: HumanDecision;
 }
 
-export type ToolExecutionStatus = 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+export type ToolExecutionStatus = 'RUNNING' | 'AWAITING_CONFIRMATION' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+
+export interface HumanConfirmationPrompt {
+  nodeId: string;
+  label: string;
+  summary: string;
+}
 
 export interface ToolExecutionState {
   invocationId: string;
@@ -236,6 +242,7 @@ export interface ToolExecutionState {
   startedAt: string;
   finishedAt?: string;
   input: Record<string, JsonValue>;
+  confirmation?: HumanConfirmationPrompt;
   result?: JsonValue;
   error?: string;
 }

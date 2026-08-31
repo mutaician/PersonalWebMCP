@@ -52,6 +52,13 @@ export type NativeToolExecutor = (
   signal: AbortSignal,
 ) => Promise<JsonValue>;
 
+export type HumanConfirmationExecutor = (
+  label: string,
+  summary: string,
+  nodeId: string,
+  signal: AbortSignal,
+) => Promise<void>;
+
 function normalized(value: string | null | undefined): string {
   return value?.replace(/\s+/g, ' ').trim().toLowerCase() ?? '';
 }
@@ -486,6 +493,7 @@ export async function executePersonalToolOnPage(
   invocationId: string,
   signal: AbortSignal,
   executeNativeTool?: NativeToolExecutor,
+  requestHumanConfirmation?: HumanConfirmationExecutor,
   depth = 0,
 ): Promise<PersonalToolExecutionResult> {
   if (depth > 3) throw new Error('Personal capability nesting is limited to four levels.');
@@ -522,6 +530,7 @@ export async function executePersonalToolOnPage(
         `${invocationId}:${node.id}`,
         signal,
         executeNativeTool,
+        requestHumanConfirmation,
         depth + 1,
       );
       context.output[node.id] = nestedResult.output;
@@ -541,6 +550,13 @@ export async function executePersonalToolOnPage(
       await executeExtractNode(node, context, signal);
     } else if (node.type === 'ASSERT') {
       await executeAssertionNode(node, context, signal);
+    } else if (node.type === 'HUMAN_CONFIRMATION') {
+      if (!requestHumanConfirmation) throw new Error('Human confirmation is unavailable in this page context.');
+      const summary = typeof node.config.summary === 'string'
+        ? node.config.summary
+        : 'Review the visible page before allowing this capability to continue.';
+      await requestHumanConfirmation(node.label, summary, node.id, signal);
+      context.output[node.id] = { approved: true };
     } else if (node.type === 'NAVIGATE') {
       if (!context.pendingNavigation) {
         const destination = node.config.destination;
