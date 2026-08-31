@@ -57,5 +57,5 @@ pnpm build
 pnpm zip:extension
 ```
 
-Browser behavior is verified through the guided manual flows documented as
-the implementation progresses.
+Browser behavior is verified by the user with the exact reset steps, expected
+visible outcomes, and pass/fail record in [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).
