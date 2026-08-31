@@ -4,7 +4,7 @@ import {
   BRIDGE_VERSION,
   type BridgeEnvelope,
 } from './bridge';
-import type { JsonSchema, PersonalToolRecord } from './models';
+import { WEBMCP_TEXT_BUDGETS, type JsonSchema, type PersonalToolRecord } from './models';
 
 export interface ContractValidationFailure {
   valid: false;
@@ -132,14 +132,32 @@ export function validatePersonalTool(value: unknown): ContractValidationResult<P
     errors.push('/version must be an integer greater than zero');
   }
   requireString(tool.webmcpName, '/webmcpName', errors, /^[A-Za-z0-9_.-]+$/);
-  if (typeof tool.webmcpName === 'string' && tool.webmcpName.length > 128) {
-    errors.push('/webmcpName must contain at most 128 characters');
+  if (typeof tool.webmcpName === 'string' && tool.webmcpName.length > WEBMCP_TEXT_BUDGETS.toolName) {
+    errors.push(`/webmcpName must contain at most ${WEBMCP_TEXT_BUDGETS.toolName} characters`);
   }
   requireString(tool.title, '/title', errors);
+  if (typeof tool.title === 'string' && tool.title.length > WEBMCP_TEXT_BUDGETS.title) {
+    errors.push(`/title must contain at most ${WEBMCP_TEXT_BUDGETS.title} characters`);
+  }
   requireString(tool.description, '/description', errors);
+  if (typeof tool.description === 'string' && tool.description.length > WEBMCP_TEXT_BUDGETS.description) {
+    errors.push(`/description must contain at most ${WEBMCP_TEXT_BUDGETS.description} characters`);
+  }
   requireRecord(tool.inputSchema, '/inputSchema', errors);
   requireString(tool.createdAt, '/createdAt', errors);
   requireString(tool.updatedAt, '/updatedAt', errors);
+
+  if (isRecord(tool.inputSchema)) {
+    const properties = isRecord(tool.inputSchema.properties) ? tool.inputSchema.properties : {};
+    for (const [name, schema] of Object.entries(properties)) {
+      if (name.length > WEBMCP_TEXT_BUDGETS.parameterName) {
+        errors.push(`/inputSchema/properties/${name} name must contain at most ${WEBMCP_TEXT_BUDGETS.parameterName} characters`);
+      }
+      if (isRecord(schema) && typeof schema.description === 'string' && schema.description.length > WEBMCP_TEXT_BUDGETS.parameterDescription) {
+        errors.push(`/inputSchema/properties/${name}/description must contain at most ${WEBMCP_TEXT_BUDGETS.parameterDescription} characters`);
+      }
+    }
+  }
 
   const scope = requireRecord(tool.scope, '/scope', errors);
   if (scope) {

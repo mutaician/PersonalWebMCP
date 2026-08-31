@@ -1,7 +1,8 @@
-import type {
-  DiscoveredWebMcpTool,
-  JsonValue,
-  PersonalToolRegistration,
+import {
+  WEBMCP_TEXT_BUDGETS,
+  type DiscoveredWebMcpTool,
+  type JsonValue,
+  type PersonalToolRegistration,
 } from '@personal-webmcp/contracts';
 
 const PERSONAL_PING_TOOL_NAME = 'personal_ping';
@@ -60,6 +61,16 @@ function cloneSerializableRecord(value: unknown): Record<string, unknown> | unde
   } catch {
     return undefined;
   }
+}
+
+function agentSafeResult(value: JsonValue): JsonValue {
+  const serialized = JSON.stringify(value);
+  if (serialized.length <= WEBMCP_TEXT_BUDGETS.output) return value;
+  return {
+    ok: true,
+    truncated: true,
+    message: `Capability completed, but its detailed result exceeded ${WEBMCP_TEXT_BUDGETS.output} characters. See the extension activity receipt for the local result.`,
+  };
 }
 
 export async function discoverWebMcpTools(): Promise<DiscoveredWebMcpTool[]> {
@@ -153,7 +164,7 @@ export async function registerPersonalTool(
     annotations: registration.annotations,
     execute: async (input, options) => {
       options?.signal?.throwIfAborted();
-      return execute(normalizeInvocationInput(input), options?.signal);
+      return agentSafeResult(await execute(normalizeInvocationInput(input), options?.signal));
     },
   }, { signal });
   registeredPersonalToolNames.add(registration.name);

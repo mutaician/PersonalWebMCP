@@ -134,6 +134,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Personal tool execution failed.';
 }
 
+const SENSITIVE_INPUT_NAME = /password|passcode|otp|one.?time|verification|security.?code|card|cvv|cvc|pin|secret|token/i;
+
+function safeInputSummary(input: Record<string, JsonValue>): Record<string, JsonValue> | undefined {
+  const safe = Object.fromEntries(Object.entries(input).filter(([name]) => !SENSITIVE_INPUT_NAME.test(name)));
+  return Object.keys(safe).length > 0 ? safe : undefined;
+}
+
 function registrationId(origin: string): string {
   let hash = 2166136261;
   for (const character of origin) {
@@ -397,7 +404,7 @@ export default defineBackground(() => {
         finishedAt,
         durationMs: Math.max(0, finishedAtMs - startedAtMs),
         status: 'SUCCEEDED',
-        inputSummary: input,
+        inputSummary: safeInputSummary(input),
         selectedLocators: result.selectedLocators,
         result: result as unknown as JsonValue,
         humanDecision: humanDecisionByInvocation.get(invocationId) ? 'APPROVED' : 'NOT_REQUIRED',
@@ -432,7 +439,8 @@ export default defineBackground(() => {
       const finishedAtMs = Date.now();
       const finishedAt = new Date(finishedAtMs).toISOString();
       const message = errorMessage(error);
-      const cancelled = error instanceof DOMException && error.name === 'AbortError'
+      const rejected = /confirmation was rejected/i.test(message);
+      const cancelled = rejected || error instanceof DOMException && error.name === 'AbortError'
         || /cancel(?:led|ed)|abort/i.test(message);
       const receipt: ActivityReceipt = {
         id: crypto.randomUUID(),
@@ -443,13 +451,20 @@ export default defineBackground(() => {
         finishedAt,
         durationMs: Math.max(0, finishedAtMs - startedAtMs),
         status: cancelled ? 'CANCELLED' : 'FAILED',
-        inputSummary: input,
+        inputSummary: safeInputSummary(input),
         selectedLocators: [],
         error: message,
         humanDecision: humanDecisionByInvocation.get(invocationId) === false ? 'REJECTED' : 'NOT_REQUIRED',
       };
       const settings = await settingsRepository.get();
       await activityReceiptRepository.save(receipt, settings.receiptLimit);
+      if (!cancelled) {
+        await toolRegistryRepository.save({
+          ...tool,
+          health: { state: 'NEEDS_REVIEW' },
+          updatedAt: finishedAt,
+        });
+      }
       executionByTab.set(tab.id, {
         invocationId,
         toolId: tool.id,

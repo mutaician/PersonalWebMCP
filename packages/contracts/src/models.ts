@@ -1,5 +1,13 @@
 export const STORAGE_SCHEMA_VERSION = 1 as const;
 export const DEFAULT_RECEIPT_LIMIT = 100;
+export const WEBMCP_TEXT_BUDGETS = {
+  toolName: 128,
+  title: 80,
+  description: 1_000,
+  parameterName: 64,
+  parameterDescription: 300,
+  output: 20_000,
+} as const;
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };

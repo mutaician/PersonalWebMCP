@@ -213,6 +213,7 @@ export default defineContentScript({
       const previousUrl = currentUrl;
       currentUrl = window.location.href;
       recorder.recordNavigation(previousUrl, currentUrl);
+      void syncPersonalTools().catch(() => undefined);
       postCommand('REFRESH_CATALOG');
     }, 500);
 

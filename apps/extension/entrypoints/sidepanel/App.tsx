@@ -205,6 +205,8 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onConf
         <div><dt>Version</dt><dd>{tool.version}</dd></div>
         <div><dt>Workflow nodes</dt><dd>{tool.workflowGraph.nodes.length}</dd></div>
         <div><dt>Health</dt><dd>{tool.health.state.replaceAll('_', ' ')}</dd></div>
+        <div><dt>Risk</dt><dd>{tool.annotations.riskClass.replaceAll('_', ' ')}</dd></div>
+        <div><dt>Dependencies</dt><dd>{tool.provenance.nativeDependencies.join(', ') || 'Visible page only'}</dd></div>
       </dl>
       <div className="runner-management">
         <span>Each taught workflow is stored separately.</span>
@@ -227,6 +229,7 @@ function ReceiptRow({ receipt }: { receipt: ActivityReceipt }) {
       </div>
       <p>{new Date(receipt.finishedAt).toLocaleString()} · {receipt.durationMs} ms</p>
       {receipt.selectedLocators.length > 0 && <p>{receipt.selectedLocators.length} visible targets resolved</p>}
+      {receipt.humanDecision !== 'NOT_REQUIRED' && <p>Human decision: {receipt.humanDecision.toLowerCase()}</p>}
       {resultMessage(receipt.result) && <p>{resultMessage(receipt.result)}</p>}
       {receipt.error && <p className="error">{receipt.error}</p>}
     </article>
