@@ -13,6 +13,7 @@ import type {
 } from '@personal-webmcp/contracts';
 import { createIdleTeachSession } from '@personal-webmcp/contracts';
 import { TeachPanel } from './teach-panel';
+import { ComposePanel } from './compose-panel';
 
 type PanelSection = 'overview' | 'teach' | 'tools' | 'activity' | 'repair';
 
@@ -114,7 +115,11 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onDele
         return;
       }
       if (value === '' || value === undefined) continue;
-      input[name] = schema.type === 'number' || schema.type === 'integer' ? Number(value) : value;
+      input[name] = schema.type === 'number' || schema.type === 'integer'
+        ? Number(value)
+        : schema.type === 'array'
+          ? String(value).split(',').map((item) => item.trim()).filter(Boolean)
+          : value;
     }
     setLocalError('');
     try {
@@ -161,7 +166,7 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onDele
                   type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'}
                   min={typeof schema.minimum === 'number' ? schema.minimum : undefined}
                   value={String(values[name] ?? '')}
-                  placeholder={`Enter ${name.replaceAll('_', ' ')}`}
+                  placeholder={schema.type === 'array' ? 'Comma-separated values' : `Enter ${name.replaceAll('_', ' ')}`}
                   onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))}
                   disabled={running}
                 />
@@ -533,6 +538,9 @@ export default function App() {
           {nativeTools.length > 0
             ? nativeTools.map((tool) => <DiscoveredToolCard tool={tool} key={`${tool.origin}:${tool.name}`} />)
             : <p className="empty-copy">This page currently exposes no native WebMCP tools.</p>}
+          {nativeTools.length > 0 && (
+            <ComposePanel nativeTools={nativeTools} personalTools={personalTools} origin={snapshot.origin} path={snapshot.path} onSaved={refresh} />
+          )}
 
           <div className="section-heading divided">
             <div><p className="overline">USER-OWNED</p><h2>Personal tools · {personalTools.length}</h2></div>

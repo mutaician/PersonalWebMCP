@@ -194,4 +194,24 @@ export async function executePersonalPing(signal?: AbortSignal): Promise<unknown
   }
 }
 
+export async function executeWebMcpTool(
+  toolName: string,
+  input: Record<string, JsonValue>,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const modelContext = getModelContext();
+  if (!modelContext) throw new Error('WebMCP is unavailable on this page.');
+  if (executionInputMode === undefined && toolName !== PERSONAL_PING_TOOL_NAME) {
+    await executePersonalPing(signal);
+  }
+  const tools = await modelContext.getTools();
+  const tool = tools.find((candidate) => candidate.name === toolName);
+  if (!tool) throw new Error(`Native WebMCP tool “${toolName}” is not registered.`);
+  return modelContext.executeTool(
+    tool,
+    executionInputMode === 'json-string' ? JSON.stringify(input) : input,
+    signal ? { signal } : undefined,
+  );
+}
+
 export { PERSONAL_PING_TOOL_NAME };

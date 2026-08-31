@@ -9,6 +9,7 @@ import {
   configuratorProducts,
   configuratorSizes,
 } from '../demo-data';
+import { useConfiguratorWebMcp } from './use-configurator-webmcp';
 
 const defaults = {
   product: 'focus-desk',
@@ -30,6 +31,7 @@ export default function ConfiguratorPage() {
   const [angle, setAngle] = useState(defaults.angle);
   const [notice, setNotice] = useState('');
   const dragState = useRef<{ pointerId: number; startX: number; startAngle: number } | null>(null);
+  useConfiguratorWebMcp({ setProduct, setSize, setFinish, setOptions, setQuantity });
 
   const selectedProduct = configuratorProducts.find((item) => item.id === product) ?? configuratorProducts[0];
   const selectedSize = configuratorSizes.find((item) => item.id === size) ?? configuratorSizes[0];

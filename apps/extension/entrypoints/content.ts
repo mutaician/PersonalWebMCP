@@ -67,6 +67,11 @@ export default defineContentScript({
     };
     let currentUrl = window.location.href;
     const activeExecutions = new Map<string, AbortController>();
+    const pendingNativeExecutions = new Map<string, {
+      resolve: (result: JsonValue) => void;
+      reject: (error: Error) => void;
+      timeoutId: number;
+    }>();
     let stopGuidedSelection: () => void = () => undefined;
     const recorder = new InteractionRecorder((snapshot) => {
       void browser.runtime.sendMessage({ type: 'TEACH_STATE_UPDATED', payload: snapshot }).catch(() => undefined);
@@ -90,7 +95,7 @@ export default defineContentScript({
     }
 
     const postCommand = (
-      type: 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING' | 'SYNC_PERSONAL_TOOLS' | 'PERSONAL_TOOL_RESULT',
+      type: 'INITIALIZE' | 'REFRESH_CATALOG' | 'RUN_PING_SELF_TEST' | 'WITHDRAW_PING' | 'SYNC_PERSONAL_TOOLS' | 'PERSONAL_TOOL_RESULT' | 'EXECUTE_NATIVE_TOOL',
       payload: unknown = {},
     ) => {
       const envelope: BridgeEnvelope = {
@@ -128,8 +133,13 @@ export default defineContentScript({
       }
 
       if (event.data.type === 'CATALOG') {
-        currentCatalog = event.data.payload as ToolCatalogPayload;
-        void browser.runtime.sendMessage({ type: 'WEBMCP_CATALOG', payload: currentCatalog });
+        const nextCatalog = event.data.payload as ToolCatalogPayload;
+        const previousNativeNames = currentCatalog.tools.filter((tool) => tool.provenance === 'NATIVE').map((tool) => tool.name).sort().join('|');
+        const nextNativeNames = nextCatalog.tools.filter((tool) => tool.provenance === 'NATIVE').map((tool) => tool.name).sort().join('|');
+        currentCatalog = nextCatalog;
+        void browser.runtime.sendMessage({ type: 'WEBMCP_CATALOG', payload: currentCatalog })
+          .then(() => previousNativeNames === nextNativeNames ? undefined : syncPersonalTools())
+          .catch(() => undefined);
       }
 
       if (event.data.type === 'PING_RESULT') {
@@ -175,6 +185,17 @@ export default defineContentScript({
           }).catch(() => undefined);
         }
       }
+
+      if (event.data.type === 'NATIVE_TOOL_RESULT') {
+        const payload = event.data.payload as { invocationId: string; nodeId: string; ok: boolean; result?: JsonValue; error?: string };
+        const key = `${payload.invocationId}:${payload.nodeId}`;
+        const pending = pendingNativeExecutions.get(key);
+        if (!pending) return;
+        window.clearTimeout(pending.timeoutId);
+        pendingNativeExecutions.delete(key);
+        if (payload.ok) pending.resolve(payload.result ?? null);
+        else pending.reject(new Error(payload.error || 'Native WebMCP tool execution failed.'));
+      }
     };
 
     window.addEventListener('message', onWindowMessage);
@@ -212,6 +233,28 @@ export default defineContentScript({
               message.input,
               message.invocationId,
               controller.signal,
+              (toolName, input, nodeId, signal) => new Promise<JsonValue>((resolve, reject) => {
+                const key = `${message.invocationId}:${nodeId}`;
+                signal.throwIfAborted();
+                const timeoutId = window.setTimeout(() => {
+                  pendingNativeExecutions.delete(key);
+                  reject(new Error(`Native tool “${toolName}” timed out.`));
+                }, 15_000);
+                pendingNativeExecutions.set(key, { resolve, reject, timeoutId });
+                signal.addEventListener('abort', () => {
+                  const pending = pendingNativeExecutions.get(key);
+                  if (!pending) return;
+                  window.clearTimeout(pending.timeoutId);
+                  pendingNativeExecutions.delete(key);
+                  reject(new DOMException('Composite execution cancelled.', 'AbortError'));
+                }, { once: true });
+                postCommand('EXECUTE_NATIVE_TOOL', {
+                  invocationId: message.invocationId,
+                  nodeId,
+                  toolName,
+                  input,
+                });
+              }),
             );
             return { ok: true, result };
           } catch (error) {
@@ -302,6 +345,11 @@ export default defineContentScript({
       window.clearInterval(navigationTimer);
       for (const controller of activeExecutions.values()) controller.abort();
       activeExecutions.clear();
+      for (const pending of pendingNativeExecutions.values()) {
+        window.clearTimeout(pending.timeoutId);
+        pending.reject(new Error('The page closed during native tool execution.'));
+      }
+      pendingNativeExecutions.clear();
       stopGuidedSelection();
       recorder.dispose();
       postCommand('WITHDRAW_PING');

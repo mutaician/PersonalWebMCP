@@ -104,13 +104,13 @@ function pathMatches(tool: PersonalToolRecord, url: URL): boolean {
   });
 }
 
-function isToolAvailable(tool: PersonalToolRecord, url: URL, supported: boolean): boolean {
+function isToolAvailable(tool: PersonalToolRecord, url: URL, supported: boolean, availableTools = new Set<string>()): boolean {
   return supported
     && tool.provenance.type !== 'SYSTEM'
     && tool.health.state !== 'BROKEN'
     && tool.scope.origin === url.origin
     && pathMatches(tool, url)
-    && tool.scope.prerequisites.every((prerequisite) => prerequisite !== 'document.modelContext' || supported);
+    && tool.scope.prerequisites.every((prerequisite) => prerequisite === 'document.modelContext' ? supported : availableTools.has(prerequisite));
 }
 
 function toRegistration(tool: PersonalToolRecord): PersonalToolRegistration {
@@ -325,9 +325,9 @@ export default defineBackground(() => {
 
     const tool = await toolRegistryRepository.get(toolId);
     if (!tool || tool.provenance.type === 'SYSTEM') throw new Error('The personal tool is no longer available.');
-    const { status } = await getLiveTabData(tab);
+    const { status, catalog } = await getLiveTabData(tab);
     const url = getUrl(status.url || tab.url);
-    if (!url || !isToolAvailable(tool, url, status.supported)) {
+    if (!url || !isToolAvailable(tool, url, status.supported, new Set(catalog.tools.map((item) => item.name)))) {
       throw new Error('This tool is not scoped to the visible page. Open its starting page and try again.');
     }
 
@@ -512,8 +512,9 @@ export default defineBackground(() => {
       const url = getUrl(message.url);
       if (!url || !sender.tab?.url || getOrigin(sender.tab.url) !== url.origin) return [];
       const tools = await toolRegistryRepository.list();
+      const availableTools = new Set(sender.tab.id === undefined ? [] : (catalogByTab.get(sender.tab.id)?.tools ?? []).map((tool) => tool.name));
       return tools
-        .filter((tool) => isToolAvailable(tool, url, message.supported))
+        .filter((tool) => isToolAvailable(tool, url, message.supported, availableTools))
         .map(toRegistration);
     }
 

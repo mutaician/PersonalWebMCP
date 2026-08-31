@@ -45,6 +45,13 @@ export class RepairRequiredError extends Error {
   }
 }
 
+export type NativeToolExecutor = (
+  toolName: string,
+  input: Record<string, JsonValue>,
+  nodeId: string,
+  signal: AbortSignal,
+) => Promise<JsonValue>;
+
 function normalized(value: string | null | undefined): string {
   return value?.replace(/\s+/g, ' ').trim().toLowerCase() ?? '';
 }
@@ -455,12 +462,33 @@ function nextNode(current: WorkflowNode, tool: PersonalToolRecord): WorkflowNode
   return edge ? tool.workflowGraph.nodes.find((candidate) => candidate.id === edge.target) : undefined;
 }
 
+function argumentsForNode(node: WorkflowNode, input: Record<string, JsonValue>): Record<string, JsonValue> {
+  const configured = node.config.arguments;
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) return {};
+  const result: Record<string, JsonValue> = {};
+  for (const [name, raw] of Object.entries(configured)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const argument = raw as Record<string, JsonValue>;
+    if (argument.mode === 'PARAMETER' && typeof argument.parameterName === 'string') {
+      if (argument.parameterName in input) result[name] = input[argument.parameterName]!;
+      else if ('value' in argument) result[name] = argument.value!;
+      else throw new Error(`Missing composite parameter “${argument.parameterName}”.`);
+    } else if ('value' in argument) {
+      result[name] = argument.value!;
+    }
+  }
+  return result;
+}
+
 export async function executePersonalToolOnPage(
   tool: PersonalToolRecord,
   input: Record<string, JsonValue>,
   invocationId: string,
   signal: AbortSignal,
+  executeNativeTool?: NativeToolExecutor,
+  depth = 0,
 ): Promise<PersonalToolExecutionResult> {
+  if (depth > 3) throw new Error('Personal capability nesting is limited to four levels.');
   const context: ExecutionContext = {
     input,
     output: {},
@@ -477,7 +505,33 @@ export async function executePersonalToolOnPage(
     if (visited.has(node.id)) throw new Error('The workflow contains a cycle that cannot be executed safely.');
     visited.add(node.id);
 
-    if (node.type === 'DOM_INPUT' || node.type === 'DOM_SELECT') {
+    if (node.type === 'NATIVE_TOOL') {
+      if (!executeNativeTool) throw new Error('Native WebMCP execution is unavailable in this page context.');
+      const toolName = node.config.toolName;
+      if (typeof toolName !== 'string') throw new Error(`${node.label} has no native tool name.`);
+      context.output[node.id] = await executeNativeTool(toolName, argumentsForNode(node, input), node.id, signal);
+    } else if (node.type === 'PERSONAL_TOOL') {
+      const parentNodeId = node.id;
+      const embedded = node.config.tool;
+      if (!embedded || typeof embedded !== 'object' || Array.isArray(embedded)) {
+        throw new Error(`${node.label} is missing its saved personal capability.`);
+      }
+      const nestedResult = await executePersonalToolOnPage(
+        embedded as unknown as PersonalToolRecord,
+        argumentsForNode(node, input),
+        `${invocationId}:${node.id}`,
+        signal,
+        executeNativeTool,
+        depth + 1,
+      );
+      context.output[node.id] = nestedResult.output;
+      context.actionsCompleted += nestedResult.actionsCompleted;
+      context.selectedLocators.push(...nestedResult.selectedLocators.map((receipt) => ({
+        ...receipt,
+        nodeId: `${parentNodeId}/${receipt.nodeId}`,
+      })));
+      if (nestedResult.navigationUrl) context.pendingNavigation = nestedResult.navigationUrl;
+    } else if (node.type === 'DOM_INPUT' || node.type === 'DOM_SELECT') {
       await executeDomValueNode(node, context, signal);
     } else if (node.type === 'DOM_ACTIVATE') {
       await executeActivationNode(node, context, signal);
@@ -502,7 +556,7 @@ export async function executePersonalToolOnPage(
   }
 
   signal.throwIfAborted();
-  if (context.pendingNavigation) {
+  if (context.pendingNavigation && depth === 0) {
     const navigationUrl = context.pendingNavigation;
     window.setTimeout(() => {
       if (!signal.aborted) window.location.assign(navigationUrl);

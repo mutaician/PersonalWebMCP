@@ -15,6 +15,7 @@ import {
 import {
   discoverWebMcpTools,
   executePersonalPing,
+  executeWebMcpTool,
   isWebMcpSupported,
   PERSONAL_PING_TOOL_NAME,
   registerPersonalPing,
@@ -207,6 +208,30 @@ export default defineUnlistedScript(() => {
     }
   };
 
+  const runNativeTool = async (payload: {
+    invocationId: string;
+    nodeId: string;
+    toolName: string;
+    input: Record<string, JsonValue>;
+  }) => {
+    try {
+      const result = await executeWebMcpTool(payload.toolName, payload.input);
+      postEvent('NATIVE_TOOL_RESULT', {
+        invocationId: payload.invocationId,
+        nodeId: payload.nodeId,
+        ok: true,
+        result: JSON.parse(JSON.stringify(result ?? null)) as JsonValue,
+      });
+    } catch (error) {
+      postEvent('NATIVE_TOOL_RESULT', {
+        invocationId: payload.invocationId,
+        nodeId: payload.nodeId,
+        ok: false,
+        error: error instanceof Error ? error.message : 'Native tool execution failed.',
+      });
+    }
+  };
+
   const onMessage = (event: MessageEvent<unknown>) => {
     if (event.source !== window || event.origin !== window.location.origin) return;
     if (!isBridgeEnvelope(event.data)) return;
@@ -230,6 +255,13 @@ export default defineUnlistedScript(() => {
       pendingInvocations.delete(payload.invocationId);
       if (payload.ok && payload.result !== undefined) pending.resolve(payload.result);
       else pending.reject(new Error(payload.error || 'Personal tool execution failed.'));
+    } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'EXECUTE_NATIVE_TOOL') {
+      void runNativeTool(event.data.payload as {
+        invocationId: string;
+        nodeId: string;
+        toolName: string;
+        input: Record<string, JsonValue>;
+      });
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'WITHDRAW_PING') {
       stopWatchingTools();
       stopWatchingTools = () => undefined;
