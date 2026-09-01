@@ -43,7 +43,8 @@ export function useTravelWebMcp(actions: TravelActions): void {
   useEffect(() => {
     const modelContext = (document as Document & { modelContext?: ModelContextLike }).modelContext;
     if (!modelContext) return;
-    const controller = new AbortController();
+    const searchController = new AbortController();
+    const detailController = new AbortController();
     const airportCodes = demoAirports.map((airport) => airport.code);
     const tripIds = demoTrips.map((trip) => trip.id);
     const cabins = ['Economy', 'Premium economy', 'Business'];
@@ -93,7 +94,7 @@ export function useTravelWebMcp(actions: TravelActions): void {
             reportDemoInvocation('travel_search_trips', result);
             return result;
           },
-        }, { signal: controller.signal }),
+        }, { signal: searchController.signal }),
         modelContext.registerTool({
           name: 'travel_get_trip_detail',
           title: 'Open trip details',
@@ -116,7 +117,7 @@ export function useTravelWebMcp(actions: TravelActions): void {
             reportDemoInvocation('travel_get_trip_detail', result);
             return result;
           },
-        }, { signal: controller.signal }),
+        }, { signal: detailController.signal }),
       ]);
     };
 
@@ -124,6 +125,9 @@ export function useTravelWebMcp(actions: TravelActions): void {
       ok: false,
       error: error instanceof Error ? error.message : 'Travel tool registration failed.',
     }));
-    return () => controller.abort();
+    return () => {
+      searchController.abort();
+      detailController.abort();
+    };
   }, [actions.search, actions.showTrip]);
 }

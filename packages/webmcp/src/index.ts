@@ -69,7 +69,7 @@ function agentSafeResult(value: JsonValue): JsonValue {
   return {
     ok: true,
     truncated: true,
-    message: `Capability completed, but its detailed result exceeded ${WEBMCP_TEXT_BUDGETS.output} characters. See the extension activity receipt for the local result.`,
+    message: `Capability completed, but its detailed result exceeded ${WEBMCP_TEXT_BUDGETS.output} characters. PersonalWebMCP kept the detailed local receipt.`,
   };
 }
 

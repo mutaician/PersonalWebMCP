@@ -288,6 +288,14 @@ export class InteractionRecorder {
     return cancelled ? { ...this.state, trace: cancelled } : this.getSnapshot();
   }
 
+  reset(): TeachSessionSnapshot {
+    this.clearOverlays();
+    this.valueStepByElement = new WeakMap();
+    this.skippedElements = new WeakSet();
+    this.state = createIdleTeachSession();
+    return this.publish();
+  }
+
   recordNavigation(previousUrl: string, nextUrl: string): void {
     if (this.state.state !== 'RECORDING' || !this.state.trace) return;
     const step: TraceStep = {

@@ -49,6 +49,7 @@ type ExtensionMessage =
   | { type: 'DELETE_PERSONAL_TOOL'; toolId: string }
   | { type: 'GET_SCOPED_PERSONAL_TOOLS'; url: string; supported: boolean }
   | { type: 'RUN_PERSONAL_TOOL'; toolId: string; input: Record<string, JsonValue>; invocationId?: string }
+  | { type: 'RUN_NATIVE_TOOL'; toolName: string; input: Record<string, JsonValue> }
   | { type: 'CANCEL_PERSONAL_TOOL'; invocationId: string }
   | { type: 'HUMAN_CONFIRMATION_REQUESTED'; invocationId: string; prompt: HumanConfirmationPrompt }
   | { type: 'RESOLVE_HUMAN_CONFIRMATION'; invocationId: string; approved: boolean }
@@ -105,6 +106,35 @@ function pathMatches(tool: PersonalToolRecord, url: URL): boolean {
       return false;
     }
   });
+}
+
+function recordedStartingPath(tool: PersonalToolRecord): string | undefined {
+  for (const node of tool.workflowGraph.nodes) {
+    const locator = node.config.locator;
+    if (locator && typeof locator === 'object' && !Array.isArray(locator)) {
+      const path = locator.path;
+      if (typeof path === 'string' && path.startsWith('/')) return path;
+    }
+  }
+  const rule = tool.scope.pathRules.find((candidate) => candidate.kind !== 'PATTERN' && candidate.value.startsWith('/'));
+  return rule?.value;
+}
+
+async function waitForPageBridge(tabId: number, expectedUrl: string): Promise<Browser.tabs.Tab> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const tab = await browser.tabs.get(tabId);
+    if (tab.status === 'complete' && tab.url?.startsWith(expectedUrl)) {
+      try {
+        await browser.tabs.sendMessage(tabId, { type: 'GET_STATUS' });
+        return tab;
+      } catch {
+        // The content script can become ready just after the document completes.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  throw new Error(`PersonalWebMCP opened ${expectedUrl}, but the page bridge did not become ready. Reload that page and run the tool again.`);
 }
 
 function isToolAvailable(tool: PersonalToolRecord, url: URL, supported: boolean, availableTools = new Set<string>()): boolean {
@@ -195,6 +225,7 @@ export default defineBackground(() => {
   const statusByTab = new Map<number, TabCapabilityStatus>();
   const catalogByTab = new Map<number, ToolCatalogPayload>();
   const pingStartedAtByTab = new Map<number, number>();
+  const connectionCheckByTab = new Map<number, ActiveTabSnapshot['connectionCheck']>();
   const teachSessionByTab = new Map<number, TeachSessionSnapshot>();
   const executionByTab = new Map<number, ToolExecutionState>();
   const humanDecisionByInvocation = new Map<string, boolean>();
@@ -251,7 +282,9 @@ export default defineBackground(() => {
       repairRepository.list(),
       pattern ? browser.permissions.contains({ origins: [pattern] }) : Promise.resolve(false),
     ]);
-    const scopedTools = personalTools.filter((tool) => !origin || tool.scope.origin === origin);
+    const scopedTools = personalTools.filter((tool) => !url || (
+      tool.scope.origin === url.origin && pathMatches(tool, url)
+    ));
     const revisions = (await Promise.all(scopedTools.map((tool) => revisionRepository.listForTool(tool.id))))
       .flat()
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -267,6 +300,7 @@ export default defineBackground(() => {
         ? createIdleTeachSession()
         : teachSessionByTab.get(tab.id) ?? createIdleTeachSession(),
       activeExecution: tab?.id === undefined ? undefined : executionByTab.get(tab.id),
+      connectionCheck: tab?.id === undefined ? undefined : connectionCheckByTab.get(tab.id),
       enabled,
       origin,
       path: url?.pathname,
@@ -328,6 +362,7 @@ export default defineBackground(() => {
     toolId: string,
     rawInput: Record<string, JsonValue>,
     requestedInvocationId?: string,
+    allowStartPageNavigation = true,
   ): Promise<PersonalToolExecutionResult> => {
     await persistenceReady;
     if (tab.id === undefined) throw new Error('No visible page is available for execution.');
@@ -336,10 +371,27 @@ export default defineBackground(() => {
 
     const tool = await toolRegistryRepository.get(toolId);
     if (!tool || tool.provenance.type === 'SYSTEM') throw new Error('The personal tool is no longer available.');
-    const { status, catalog } = await getLiveTabData(tab);
-    const url = getUrl(status.url || tab.url);
+    let executionTab = tab;
+    let { status, catalog } = await getLiveTabData(executionTab);
+    let url = getUrl(status.url || executionTab.url);
     if (!url || !isToolAvailable(tool, url, status.supported, new Set(catalog.tools.map((item) => item.name)))) {
-      throw new Error('This tool is not scoped to the visible page. Open its starting page and try again.');
+      const startPath = recordedStartingPath(tool) ?? tool.scope.pathRules[0]?.value ?? '/';
+      throw new Error(`“${tool.title}” is available on ${tool.scope.origin}${startPath}. Open that page and try again.`);
+    }
+
+    const startPath = recordedStartingPath(tool);
+    if (startPath && `${url.pathname}${url.search}` !== startPath) {
+      const targetUrl = `${tool.scope.origin}${startPath}`;
+      if (!allowStartPageNavigation) {
+        throw new Error(`“${tool.title}” starts on ${targetUrl}. Open that page before asking the agent to run it.`);
+      }
+      await browser.tabs.update(tab.id, { url: targetUrl });
+      executionTab = await waitForPageBridge(tab.id, targetUrl);
+      ({ status, catalog } = await getLiveTabData(executionTab));
+      url = getUrl(status.url || executionTab.url);
+      if (!url || !isToolAvailable(tool, url, status.supported, new Set(catalog.tools.map((item) => item.name)))) {
+        throw new Error(`PersonalWebMCP opened ${targetUrl}, but “${tool.title}” was not available there. Reload that page and try again.`);
+      }
     }
 
     const validation = validateInvocationInput(tool.inputSchema, rawInput ?? {});
@@ -359,7 +411,7 @@ export default defineBackground(() => {
     await publishExecutionState();
 
     try {
-      const response = await browser.tabs.sendMessage(tab.id, {
+      const response = await browser.tabs.sendMessage(executionTab.id!, {
         type: 'EXECUTE_TOOL_WORKFLOW',
         tool,
         input,
@@ -498,6 +550,13 @@ export default defineBackground(() => {
       const tabId = sender.tab.id;
       const startedAt = pingStartedAtByTab.get(tabId) ?? Date.now();
       pingStartedAtByTab.delete(tabId);
+      connectionCheckByTab.set(tabId, {
+        state: message.payload.ok ? 'SUCCEEDED' : 'FAILED',
+        message: message.payload.ok
+          ? 'Connection verified: personal_ping executed on the visible page.'
+          : message.payload.error || 'The connection check failed.',
+        checkedAt: Date.now(),
+      });
       await savePingReceipt(
         message.payload,
         getOrigin(statusByTab.get(tabId)?.url ?? sender.tab.url),
@@ -542,7 +601,20 @@ export default defineBackground(() => {
     if (message.type === 'RUN_PERSONAL_TOOL') {
       const tab = sender.tab ?? await getActiveTab();
       if (!tab) throw new Error('Open the tool’s starting page before running it.');
-      return runPersonalTool(tab, message.toolId, message.input ?? {}, message.invocationId);
+      return runPersonalTool(tab, message.toolId, message.input ?? {}, message.invocationId, sender.tab === undefined);
+    }
+
+    if (message.type === 'RUN_NATIVE_TOOL') {
+      const tab = sender.tab ?? await getActiveTab();
+      if (tab?.id === undefined) throw new Error('Open the page that owns this native tool before running it.');
+      const { catalog } = await getLiveTabData(tab);
+      const tool = catalog.tools.find((candidate) => candidate.provenance === 'NATIVE' && candidate.name === message.toolName);
+      if (!tool) throw new Error(`The visible page no longer exposes “${message.toolName}”. Refresh the Tools view and try again.`);
+      return browser.tabs.sendMessage(tab.id, {
+        type: 'EXECUTE_NATIVE_TOOL_DIRECT',
+        toolName: message.toolName,
+        input: message.input ?? {},
+      });
     }
 
     if (message.type === 'HUMAN_CONFIRMATION_REQUESTED' && sender.tab?.id !== undefined) {
@@ -748,6 +820,9 @@ export default defineBackground(() => {
       };
       await revisionRepository.save(revision);
       if (activeTab?.id !== undefined) {
+        const idle = createIdleTeachSession();
+        teachSessionByTab.set(activeTab.id, idle);
+        void browser.tabs.sendMessage(activeTab.id, { type: 'RESET_TEACHING' }).catch(() => undefined);
         void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
       }
       void browser.runtime.sendMessage({ type: 'PERSONAL_TOOLS_CHANGED' }).catch(() => undefined);
@@ -808,10 +883,20 @@ export default defineBackground(() => {
 
     if (message.type === 'RUN_PING_SELF_TEST') {
       pingStartedAtByTab.set(activeTab.id, Date.now());
+      connectionCheckByTab.set(activeTab.id, {
+        state: 'RUNNING',
+        message: 'Running personal_ping on the visible page…',
+        checkedAt: Date.now(),
+      });
       try {
         return await browser.tabs.sendMessage(activeTab.id, { type: 'RUN_PING_SELF_TEST' });
       } catch (error) {
         pingStartedAtByTab.delete(activeTab.id);
+        connectionCheckByTab.set(activeTab.id, {
+          state: 'FAILED',
+          message: error instanceof Error ? error.message : 'The connection check could not start.',
+          checkedAt: Date.now(),
+        });
         throw error;
       }
     }
@@ -824,12 +909,14 @@ export default defineBackground(() => {
     statusByTab.delete(tabId);
     catalogByTab.delete(tabId);
     pingStartedAtByTab.delete(tabId);
+    connectionCheckByTab.delete(tabId);
   });
 
   browser.tabs.onRemoved.addListener((tabId) => {
     statusByTab.delete(tabId);
     catalogByTab.delete(tabId);
     pingStartedAtByTab.delete(tabId);
+    connectionCheckByTab.delete(tabId);
     teachSessionByTab.delete(tabId);
     executionByTab.delete(tabId);
   });

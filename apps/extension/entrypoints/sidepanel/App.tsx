@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   ActiveTabSnapshot,
-  ActivityReceipt,
   DiscoveredWebMcpTool,
   JsonValue,
   PersonalToolRecord,
@@ -15,13 +14,12 @@ import { createIdleTeachSession } from '@personal-webmcp/contracts';
 import { TeachPanel } from './teach-panel';
 import { ComposePanel } from './compose-panel';
 
-type PanelSection = 'overview' | 'teach' | 'tools' | 'activity' | 'repair';
+type PanelSection = 'overview' | 'teach' | 'tools' | 'repair';
 
 const panelLabels: Record<PanelSection, string> = {
   overview: 'Overview',
   teach: 'Teach',
   tools: 'Tools',
-  activity: 'Activity',
   repair: 'Repair',
 };
 
@@ -51,9 +49,103 @@ const emptySnapshot: ActiveTabSnapshot = {
   enabled: false,
 };
 
-function DiscoveredToolCard({ tool }: { tool: DiscoveredWebMcpTool }) {
+function propertiesFromSchema(schema: Record<string, unknown> | undefined): Record<string, Record<string, unknown>> {
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return {};
+  return Object.fromEntries(Object.entries(properties).filter((entry): entry is [string, Record<string, unknown>] => (
+    Boolean(entry[1]) && typeof entry[1] === 'object' && !Array.isArray(entry[1])
+  )));
+}
+
+function initialSchemaValues(schema: Record<string, unknown> | undefined): Record<string, string | boolean> {
+  return Object.fromEntries(Object.entries(propertiesFromSchema(schema)).map(([name, property]) => {
+    if (typeof property.default === 'boolean') return [name, property.default];
+    if (Array.isArray(property.default)) return [name, property.default.join(',')];
+    return [name, String(property.default ?? '')];
+  }));
+}
+
+function buildSchemaInput(
+  schema: Record<string, unknown> | undefined,
+  values: Record<string, string | boolean>,
+): Record<string, JsonValue> {
+  const input: Record<string, JsonValue> = {};
+  const required = new Set(Array.isArray(schema?.required) ? schema.required.filter((name): name is string => typeof name === 'string') : []);
+  for (const [name, property] of Object.entries(propertiesFromSchema(schema))) {
+    const value = values[name];
+    if ((value === '' || value === undefined) && required.has(name)) throw new Error(`${name.replaceAll('_', ' ')} is required.`);
+    if (value === '' || value === undefined) continue;
+    input[name] = property.type === 'number' || property.type === 'integer'
+      ? Number(value)
+      : property.type === 'array'
+        ? String(value).split(',').map((item) => item.trim()).filter(Boolean)
+        : value;
+  }
+  return input;
+}
+
+function SchemaField({
+  name,
+  schema,
+  value,
+  required,
+  disabled,
+  onChange,
+}: {
+  name: string;
+  schema: Record<string, unknown>;
+  value: string | boolean | undefined;
+  required: boolean;
+  disabled: boolean;
+  onChange: (value: string | boolean) => void;
+}) {
+  const enumValues = Array.isArray(schema.enum) ? schema.enum.filter((item): item is string | number => typeof item === 'string' || typeof item === 'number') : [];
+  const itemSchema = schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items) ? schema.items as Record<string, unknown> : undefined;
+  const arrayEnum = Array.isArray(itemSchema?.enum) ? itemSchema.enum.filter((item): item is string => typeof item === 'string') : [];
+  const selectedArray = new Set(String(value ?? '').split(',').filter(Boolean));
   return (
-    <details className="tool-card">
+    <label className={schema.type === 'array' && arrayEnum.length > 0 ? 'wide-field' : undefined}>
+      <span>{name.replaceAll('_', ' ')} {required && <em>required</em>}</span>
+      {schema.type === 'boolean' ? (
+        <input className="runner-checkbox" type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} disabled={disabled} />
+      ) : enumValues.length > 0 ? (
+        <select value={String(value ?? '')} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
+          <option value="">Select {name.replaceAll('_', ' ')}</option>
+          {enumValues.map((option) => <option value={String(option)} key={String(option)}>{String(option)}</option>)}
+        </select>
+      ) : schema.type === 'array' && arrayEnum.length > 0 ? (
+        <span className="enum-checks">{arrayEnum.map((option) => <span key={option}><input type="checkbox" checked={selectedArray.has(option)} onChange={(event) => { const next = new Set(selectedArray); if (event.target.checked) next.add(option); else next.delete(option); onChange([...next].join(',')); }} disabled={disabled} />{option}</span>)}</span>
+      ) : (
+        <input type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'} min={typeof schema.minimum === 'number' ? schema.minimum : undefined} max={typeof schema.maximum === 'number' ? schema.maximum : undefined} value={String(value ?? '')} placeholder={schema.type === 'array' ? 'Comma-separated values' : `Enter ${name.replaceAll('_', ' ')}`} onChange={(event) => onChange(event.target.value)} disabled={disabled} />
+      )}
+      {typeof schema.description === 'string' && <small>{schema.description}</small>}
+    </label>
+  );
+}
+
+function DiscoveredToolCard({ tool, onRun }: { tool: DiscoveredWebMcpTool; onRun: (tool: DiscoveredWebMcpTool, input: Record<string, JsonValue>) => Promise<JsonValue> }) {
+  const schema = tool.inputSchema ?? {};
+  const properties = propertiesFromSchema(schema);
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((name): name is string => typeof name === 'string') : []);
+  const [values, setValues] = useState<Record<string, string | boolean>>(() => initialSchemaValues(schema));
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<JsonValue>();
+  const [error, setError] = useState('');
+  const submit = async () => {
+    setRunning(true);
+    setError('');
+    setResult(undefined);
+    try {
+      const input = buildSchemaInput(schema, values);
+      setResult(await onRun(tool, input));
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : 'Native tool execution failed.');
+    } finally {
+      setRunning(false);
+    }
+  };
+  return (
+    <details className="tool-card native-runner">
       <summary>
         <div>
           <span className={`provenance ${tool.provenance.toLowerCase()}`}>{tool.provenance}</span>
@@ -67,7 +159,11 @@ function DiscoveredToolCard({ tool }: { tool: DiscoveredWebMcpTool }) {
         <div><dt>Origin</dt><dd>{tool.origin}</dd></div>
         <div><dt>Read only</dt><dd>{tool.annotations?.readOnlyHint ? 'Yes' : 'No / unspecified'}</dd></div>
       </dl>
-      <pre>{JSON.stringify(tool.inputSchema ?? {}, null, 2)}</pre>
+      {Object.keys(properties).length > 0 ? <div className="runner-fields">{Object.entries(properties).map(([name, property]) => <SchemaField name={name} schema={property} value={values[name]} required={required.has(name)} disabled={running} onChange={(value) => setValues((current) => ({ ...current, [name]: value }))} key={name} />)}</div> : <p className="runner-note">This tool does not require input.</p>}
+      <div className="runner-actions"><button className="primary-button" type="button" onClick={() => void submit()} disabled={running}>{running ? 'Running native tool…' : 'Run native tool'}</button></div>
+      {error && <p className="run-result failed" role="alert">{error}</p>}
+      {result !== undefined && <pre className="native-result">{JSON.stringify(result, null, 2)}</pre>}
+      <details className="contract-details"><summary>View input schema</summary><pre>{JSON.stringify(schema, null, 2)}</pre></details>
     </details>
   );
 }
@@ -83,13 +179,7 @@ interface PersonalToolCardProps {
 }
 
 function schemaProperties(tool: PersonalToolRecord): Record<string, Record<string, unknown>> {
-  const properties = tool.inputSchema.properties;
-  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return {};
-  return Object.fromEntries(
-    Object.entries(properties).filter((entry): entry is [string, Record<string, unknown>] => (
-      Boolean(entry[1]) && typeof entry[1] === 'object' && !Array.isArray(entry[1])
-    )),
-  );
+  return propertiesFromSchema(tool.inputSchema);
 }
 
 function resultMessage(result: JsonValue | undefined): string | undefined {
@@ -100,31 +190,16 @@ function resultMessage(result: JsonValue | undefined): string | undefined {
 function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onConfirm, onDelete }: PersonalToolCardProps) {
   const properties = schemaProperties(tool);
   const required = new Set(Array.isArray(tool.inputSchema.required) ? tool.inputSchema.required.filter((name): name is string => typeof name === 'string') : []);
-  const [values, setValues] = useState<Record<string, string | boolean>>(() => Object.fromEntries(
-    Object.entries(properties).map(([name, schema]) => [name, typeof schema.default === 'boolean' ? schema.default : String(schema.default ?? '')]),
-  ));
+  const [values, setValues] = useState<Record<string, string | boolean>>(() => initialSchemaValues(tool.inputSchema));
   const [localError, setLocalError] = useState('');
   const running = execution?.status === 'RUNNING' || execution?.status === 'AWAITING_CONFIRMATION';
   const awaitingConfirmation = execution?.status === 'AWAITING_CONFIRMATION';
   const fixedPreferences = tool.workflowGraph.nodes.filter((node) => node.config.valueSource === 'FIXED' && node.config.value !== undefined);
 
   const submit = async () => {
-    const input: Record<string, JsonValue> = {};
-    for (const [name, schema] of Object.entries(properties)) {
-      const value = values[name];
-      if ((value === '' || value === undefined) && required.has(name)) {
-        setLocalError(`${name.replaceAll('_', ' ')} is required.`);
-        return;
-      }
-      if (value === '' || value === undefined) continue;
-      input[name] = schema.type === 'number' || schema.type === 'integer'
-        ? Number(value)
-        : schema.type === 'array'
-          ? String(value).split(',').map((item) => item.trim()).filter(Boolean)
-          : value;
-    }
     setLocalError('');
     try {
+      const input = buildSchemaInput(tool.inputSchema, values);
       await onRun(tool, input);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'Tool execution failed.');
@@ -152,29 +227,7 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onConf
       )}
       {Object.keys(properties).length > 0 && (
         <div className="runner-fields">
-          {Object.entries(properties).map(([name, schema]) => (
-            <label key={name}>
-              <span>{name.replaceAll('_', ' ')} {required.has(name) && <em>required</em>}</span>
-              {schema.type === 'boolean' ? (
-                <input
-                  className="runner-checkbox"
-                  type="checkbox"
-                  checked={Boolean(values[name])}
-                  onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.checked }))}
-                  disabled={running}
-                />
-              ) : (
-                <input
-                  type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'}
-                  min={typeof schema.minimum === 'number' ? schema.minimum : undefined}
-                  value={String(values[name] ?? '')}
-                  placeholder={schema.type === 'array' ? 'Comma-separated values' : `Enter ${name.replaceAll('_', ' ')}`}
-                  onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))}
-                  disabled={running}
-                />
-              )}
-            </label>
-          ))}
+          {Object.entries(properties).map(([name, schema]) => <SchemaField name={name} schema={schema} value={values[name]} required={required.has(name)} disabled={running} onChange={(value) => setValues((current) => ({ ...current, [name]: value }))} key={name} />)}
         </div>
       )}
       <div className="runner-actions">
@@ -217,22 +270,6 @@ function PersonalToolCard({ tool, registered, execution, onRun, onCancel, onConf
         <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
       </details>
     </details>
-  );
-}
-
-function ReceiptRow({ receipt }: { receipt: ActivityReceipt }) {
-  return (
-    <article className="receipt">
-      <div>
-        <span className={`receipt-status ${receipt.status.toLowerCase()}`}>{receipt.status}</span>
-        <strong>{receipt.toolId}</strong>
-      </div>
-      <p>{new Date(receipt.finishedAt).toLocaleString()} · {receipt.durationMs} ms</p>
-      {receipt.selectedLocators.length > 0 && <p>{receipt.selectedLocators.length} visible targets resolved</p>}
-      {receipt.humanDecision !== 'NOT_REQUIRED' && <p>Human decision: {receipt.humanDecision.toLowerCase()}</p>}
-      {resultMessage(receipt.result) && <p>{resultMessage(receipt.result)}</p>}
-      {receipt.error && <p className="error">{receipt.error}</p>}
-    </article>
   );
 }
 
@@ -285,6 +322,18 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<ActiveTabSnapshot>(emptySnapshot);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState('');
+  const [toast, setToast] = useState<{ tone: 'success' | 'error' | 'info'; message: string }>();
+  const [seenConnectionCheckAt, setSeenConnectionCheckAt] = useState(0);
+
+  const pushToast = useCallback((tone: 'success' | 'error' | 'info', message: string) => {
+    setToast({ tone, message });
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timeoutId = window.setTimeout(() => setToast(undefined), 4_500);
+    return () => window.clearTimeout(timeoutId);
+  }, [toast]);
 
   const refresh = useCallback(async () => {
     try {
@@ -323,12 +372,34 @@ export default function App() {
 
   const isRegistered = (tool: PersonalToolRecord) => registeredPersonalTools.some((registered) => registered.name === tool.webmcpName);
 
+  useEffect(() => {
+    const check = snapshot.connectionCheck;
+    if (!check || check.checkedAt <= seenConnectionCheckAt || check.state === 'RUNNING') return;
+    setSeenConnectionCheckAt(check.checkedAt);
+    pushToast(check.state === 'SUCCEEDED' ? 'success' : 'error', check.message);
+  }, [pushToast, seenConnectionCheckAt, snapshot.connectionCheck]);
+
+  const runNativeTool = async (tool: DiscoveredWebMcpTool, input: Record<string, JsonValue>): Promise<JsonValue> => {
+    try {
+      const result = await browser.runtime.sendMessage({ type: 'RUN_NATIVE_TOOL', toolName: tool.name, input }) as JsonValue;
+      pushToast('success', `${tool.title} completed on the visible page.`);
+      await refresh();
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Native tool execution failed.';
+      pushToast('error', message);
+      throw error;
+    }
+  };
+
   const runPersonalTool = async (tool: PersonalToolRecord, input: Record<string, JsonValue>) => {
     setActionError('');
     try {
       await browser.runtime.sendMessage({ type: 'RUN_PERSONAL_TOOL', toolId: tool.id, input });
+      pushToast('success', `${tool.title} completed.`);
       await refresh();
     } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : 'Personal tool execution failed.');
       await refresh();
       throw error;
     }
@@ -337,6 +408,7 @@ export default function App() {
   const cancelPersonalTool = async (invocationId: string) => {
     setActionError('');
     await browser.runtime.sendMessage({ type: 'CANCEL_PERSONAL_TOOL', invocationId });
+    pushToast('info', 'Tool run cancelled.');
     window.setTimeout(() => void refresh(), 150);
   };
 
@@ -344,6 +416,7 @@ export default function App() {
     setActionError('');
     try {
       await browser.runtime.sendMessage({ type: 'RESOLVE_HUMAN_CONFIRMATION', invocationId, approved });
+      pushToast('info', approved ? 'Approved. The workflow is continuing.' : 'Rejected. The workflow was stopped.');
       window.setTimeout(() => void refresh(), 150);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not record the confirmation decision.');
@@ -355,6 +428,7 @@ export default function App() {
     setActionError('');
     try {
       await browser.runtime.sendMessage({ type: 'DELETE_PERSONAL_TOOL', toolId: tool.id });
+      pushToast('success', `${tool.title} was deleted.`);
       await refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not delete the personal tool.');
@@ -366,6 +440,7 @@ export default function App() {
     setActionError('');
     try {
       await browser.runtime.sendMessage(message);
+      pushToast('success', 'The capability was updated.');
       await refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'The repair action failed.');
@@ -388,6 +463,7 @@ export default function App() {
     setActionError('');
     try {
       await browser.runtime.sendMessage({ type: 'RUN_PING_SELF_TEST' });
+      pushToast('info', 'Running personal_ping on the visible page…');
       window.setTimeout(() => void refresh(), 500);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Connection check failed.');
@@ -407,22 +483,10 @@ export default function App() {
         return;
       }
       await browser.runtime.sendMessage({ type: 'ENABLE_ORIGIN', origin: snapshot.origin });
+      pushToast('success', `PersonalWebMCP is enabled for ${snapshot.origin}.`);
       window.setTimeout(() => void refresh(), 500);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not enable this site.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const clearActivity = async () => {
-    setBusy(true);
-    setActionError('');
-    try {
-      await browser.runtime.sendMessage({ type: 'CLEAR_ACTIVITY_HISTORY' });
-      await refresh();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not clear activity.');
     } finally {
       setBusy(false);
     }
@@ -451,7 +515,7 @@ export default function App() {
       </header>
 
       <nav aria-label="PersonalWebMCP sections">
-        {(['overview', 'teach', 'tools', 'activity', 'repair'] as const).map((item) => (
+        {(['overview', 'teach', 'tools', 'repair'] as const).map((item) => (
           <button
             className={section === item ? 'active' : ''}
             type="button"
@@ -463,6 +527,8 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      {toast && <div className={`toast ${toast.tone}`} role="status"><span>{toast.tone === 'success' ? '✓' : toast.tone === 'error' ? '!' : 'i'}</span><p>{toast.message}</p><button type="button" aria-label="Dismiss notification" onClick={() => setToast(undefined)}>×</button></div>}
 
       <section className="site-summary">
         <p className="overline">CURRENT SITE</p>
@@ -512,6 +578,13 @@ export default function App() {
 
             {snapshot.status.error && <p className="error" role="alert">{snapshot.status.error}</p>}
 
+            {snapshot.connectionCheck && (
+              <p className={`connection-status ${snapshot.connectionCheck.state.toLowerCase()}`} role="status">
+                <strong>{snapshot.connectionCheck.state === 'RUNNING' ? 'Checking' : snapshot.connectionCheck.state === 'SUCCEEDED' ? 'Connected' : 'Connection failed'}</strong>
+                <span>{snapshot.connectionCheck.message}</span>
+              </p>
+            )}
+
             <button
               className="primary-button"
               type="button"
@@ -550,7 +623,7 @@ export default function App() {
           session={snapshot.teachSession}
           enabled={snapshot.enabled}
           onSessionChange={(teachSession) => setSnapshot((current) => ({ ...current, teachSession }))}
-          onSaved={async () => { await refresh(); setSection('tools'); }}
+          onSaved={async () => { pushToast('success', 'Personal tool saved. The teaching canvas is ready for a new workflow.'); await refresh(); setSection('tools'); }}
         />
       )}
 
@@ -560,7 +633,7 @@ export default function App() {
             <div><p className="overline">WEBSITE-OWNED</p><h2>Native tools · {nativeTools.length}</h2></div>
           </div>
           {nativeTools.length > 0
-            ? nativeTools.map((tool) => <DiscoveredToolCard tool={tool} key={`${tool.origin}:${tool.name}`} />)
+            ? nativeTools.map((tool) => <DiscoveredToolCard tool={tool} onRun={runNativeTool} key={`${tool.origin}:${tool.name}`} />)
             : <p className="empty-copy">This page currently exposes no native WebMCP tools.</p>}
           {nativeTools.length > 0 && (
             <ComposePanel nativeTools={nativeTools} personalTools={personalTools} origin={snapshot.origin} path={snapshot.path} onSaved={refresh} />
@@ -587,22 +660,6 @@ export default function App() {
           {registeredPersonalTools.filter((tool) => tool.name !== 'personal_ping').length !== personalTools.length && (
             <p className="hint">Registered and stored counts may briefly differ while the page catalog refreshes.</p>
           )}
-        </section>
-      )}
-
-      {section === 'activity' && (
-        <section className="section-block flush">
-          <div className="section-heading">
-            <div><p className="overline">LOCAL RECEIPTS</p><h2>Recent activity · {snapshot.receipts.length}</h2></div>
-            {snapshot.receipts.length > 0 && (
-              <button className="text-button danger-button" type="button" onClick={clearActivity} disabled={busy}>
-                Clear
-              </button>
-            )}
-          </div>
-          {snapshot.receipts.length > 0
-            ? snapshot.receipts.map((receipt) => <ReceiptRow receipt={receipt} key={receipt.id} />)
-            : <p className="empty-copy">Successful and failed tool runs will appear here.</p>}
         </section>
       )}
 

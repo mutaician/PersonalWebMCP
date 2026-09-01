@@ -44,7 +44,7 @@ export function useConfiguratorWebMcp(actions: ConfiguratorActions): void {
   useEffect(() => {
     const modelContext = (document as Document & { modelContext?: ModelContextLike }).modelContext;
     if (!modelContext) return;
-    const controller = new AbortController();
+    const controllers: AbortController[] = [];
     const register = async () => {
       const productIds = configuratorProducts.map((item) => item.id);
       const sizeIds = configuratorSizes.map((item) => item.id);
@@ -88,24 +88,28 @@ export function useConfiguratorWebMcp(actions: ConfiguratorActions): void {
         },
       ];
 
-      await Promise.all(definitions.map((definition) => modelContext.registerTool({
-        name: definition.name,
-        title: definition.title,
-        description: definition.description,
-        inputSchema: definition.inputSchema,
-        annotations: { readOnlyHint: false, untrustedContentHint: false },
-        execute: async (rawInput, options) => {
-          options?.signal?.throwIfAborted();
-          const result = { ok: true, ...definition.run(inputRecord(rawInput ?? {})) };
-          reportDemoInvocation(definition.name, result);
-          return result;
-        },
-      }, { signal: controller.signal })));
+      await Promise.all(definitions.map((definition) => {
+        const controller = new AbortController();
+        controllers.push(controller);
+        return modelContext.registerTool({
+          name: definition.name,
+          title: definition.title,
+          description: definition.description,
+          inputSchema: definition.inputSchema,
+          annotations: { readOnlyHint: false, untrustedContentHint: false },
+          execute: async (rawInput, options) => {
+            options?.signal?.throwIfAborted();
+            const result = { ok: true, ...definition.run(inputRecord(rawInput ?? {})) };
+            reportDemoInvocation(definition.name, result);
+            return result;
+          },
+        }, { signal: controller.signal });
+      }));
     };
     void register().catch((error) => reportDemoInvocation('configurator_registration', {
       ok: false,
       error: error instanceof Error ? error.message : 'Native tool registration failed.',
     }));
-    return () => controller.abort();
+    return () => controllers.forEach((controller) => controller.abort());
   }, [actions.setFinish, actions.setOptions, actions.setProduct, actions.setQuantity, actions.setSize]);
 }

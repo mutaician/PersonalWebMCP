@@ -82,12 +82,7 @@ function CapturedStepRow({
         {step.locator?.landmark && <p className="capture-context">Inside {step.locator.landmark} · {step.locator.path}</p>}
         {choice.include && hasValue && (
           <div className="value-choice">
-            <label>Use value as
-              <select value={choice.valueMode ?? 'FIXED'} onChange={(event) => onChange({ ...choice, valueMode: event.target.value as 'FIXED' | 'PARAMETER' })}>
-                <option value="FIXED">Fixed preference</option>
-                <option value="PARAMETER">Tool parameter</option>
-              </select>
-            </label>
+            <div className="value-mode-field"><span>Use value as</span><div className="value-mode-buttons" role="group" aria-label="How this captured value should be used"><button className={(choice.valueMode ?? 'FIXED') === 'FIXED' ? 'active' : ''} type="button" onClick={() => onChange({ ...choice, valueMode: 'FIXED' })}>Remember this value</button><button className={choice.valueMode === 'PARAMETER' ? 'active' : ''} type="button" onClick={() => onChange({ ...choice, valueMode: 'PARAMETER' })}>Ask each run</button></div></div>
             {choice.valueMode === 'PARAMETER' && (
               <>
                 <label>Parameter name<input value={choice.parameterName ?? ''} onChange={(event) => onChange({ ...choice, parameterName: event.target.value })} /></label>
@@ -279,8 +274,8 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
       <details className="workflow-preview"><summary>Workflow graph · {previewNodes.length} nodes</summary><ol>{previewNodes.map((node) => <li key={node.id}><code>{node.type}</code><span>{node.label}</span></li>)}</ol></details>
       {error && <p className="notice error" role="alert">{error}</p>}
       {testResult && <p className="notice success-notice" role="status">{testResult}</p>}
-      <div className="compile-actions"><button type="button" onClick={() => void testDraft()} disabled={busy}>Test draft</button><button className="primary-button" type="button" onClick={() => void saveTool()} disabled={busy || !testResult}>{busy ? 'Working…' : 'Save personal tool'}</button></div>
-      <p className="hint">Draft testing checks the contract and graph. Once saved, run the tool from the visible page or through WebMCP.</p>
+      <div className="compile-actions"><button type="button" onClick={() => void testDraft()} disabled={busy}>Validate contract</button><button className="primary-button" type="button" onClick={() => void saveTool()} disabled={busy || !testResult}>{busy ? 'Working…' : 'Save personal tool'}</button></div>
+      <p className="hint">Validation checks the schema, scope, and workflow structure only. It does not click or run anything on the page. Save the tool, then run it from Tools for the real test.</p>
     </section>
   );
 }

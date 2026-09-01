@@ -120,12 +120,12 @@ Expected: invalid arguments are rejected before acting; missing targets do not t
 
 Result: [ ] Pass  [ ] Fail  Notes: ______________________________
 
-## 9. Activity, provenance, and sensitive fields
+## 9. Run feedback, provenance, and sensitive fields
 
-1. Review successful, failed, cancelled, approved, and rejected runs in Activity.
+1. Confirm successful, failed, cancelled, approved, and rejected runs produce a visible toast in the side panel.
 2. Confirm tool cards show TAUGHT or COMPOSITE provenance, risk, health, version, and native dependencies.
 3. Start teaching on any page containing a password, OTP, or payment-card-style control. Interact with that field, then finish teaching.
-4. Confirm it is counted as sensitive/skipped and its value is absent from the captured workflow, generated contract, and activity input summary.
+4. Confirm it is counted as sensitive/skipped and its value is absent from the captured workflow, generated contract, and locally stored receipt input summary.
 
 Expected: receipts remain local, human decisions are distinct from run status, and sensitive values never enter durable extension storage.
 

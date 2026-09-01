@@ -33,7 +33,9 @@ type ContentMessage =
   | { type: 'RESUME_TEACHING' }
   | { type: 'CANCEL_TEACHING' }
   | { type: 'FINISH_TEACHING' }
+  | { type: 'RESET_TEACHING' }
   | { type: 'SYNC_PERSONAL_TOOLS' }
+  | { type: 'EXECUTE_NATIVE_TOOL_DIRECT'; toolName: string; input: Record<string, JsonValue> }
   | { type: 'EXECUTE_TOOL_WORKFLOW'; tool: PersonalToolRecord; input: Record<string, JsonValue>; invocationId: string }
   | { type: 'CANCEL_TOOL_WORKFLOW'; invocationId: string }
   | { type: 'RESOLVE_HUMAN_CONFIRMATION'; invocationId: string; approved: boolean }
@@ -68,6 +70,7 @@ export default defineContentScript({
       tools: [],
     };
     let currentUrl = window.location.href;
+    let personalSyncTimer: number | undefined;
     const activeExecutions = new Map<string, AbortController>();
     const pendingNativeExecutions = new Map<string, {
       resolve: (result: JsonValue) => void;
@@ -129,13 +132,21 @@ export default defineContentScript({
       postCommand('SYNC_PERSONAL_TOOLS', { tools: Array.isArray(tools) ? tools : [] });
     };
 
+    const schedulePersonalToolsSync = (delay = 120) => {
+      if (personalSyncTimer !== undefined) window.clearTimeout(personalSyncTimer);
+      personalSyncTimer = window.setTimeout(() => {
+        personalSyncTimer = undefined;
+        void syncPersonalTools().catch(() => undefined);
+      }, delay);
+    };
+
     const onWindowMessage = (event: MessageEvent<unknown>) => {
       if (event.source !== window || event.origin !== window.location.origin) return;
       if (!isBridgeEnvelope(event.data) || event.data.tabSessionId !== tabSessionId) return;
 
       if (event.data.type === 'STATUS') {
         const status = event.data.payload as WebMcpStatusPayload;
-        void publishStatus(status).then(() => syncPersonalTools()).catch(() => undefined);
+        void publishStatus(status).then(() => schedulePersonalToolsSync()).catch(() => undefined);
       }
 
       if (event.data.type === 'CATALOG') {
@@ -144,7 +155,7 @@ export default defineContentScript({
         const nextNativeNames = nextCatalog.tools.filter((tool) => tool.provenance === 'NATIVE').map((tool) => tool.name).sort().join('|');
         currentCatalog = nextCatalog;
         void browser.runtime.sendMessage({ type: 'WEBMCP_CATALOG', payload: currentCatalog })
-          .then(() => previousNativeNames === nextNativeNames ? undefined : syncPersonalTools())
+          .then(() => previousNativeNames === nextNativeNames ? undefined : schedulePersonalToolsSync())
           .catch(() => undefined);
       }
 
@@ -213,7 +224,7 @@ export default defineContentScript({
       const previousUrl = currentUrl;
       currentUrl = window.location.href;
       recorder.recordNavigation(previousUrl, currentUrl);
-      void syncPersonalTools().catch(() => undefined);
+      schedulePersonalToolsSync();
       postCommand('REFRESH_CATALOG');
     }, 500);
 
@@ -226,8 +237,27 @@ export default defineContentScript({
       if (message.type === 'RESUME_TEACHING') return Promise.resolve(recorder.resume());
       if (message.type === 'CANCEL_TEACHING') return Promise.resolve(recorder.cancel());
       if (message.type === 'FINISH_TEACHING') return Promise.resolve(recorder.finish());
+      if (message.type === 'RESET_TEACHING') return Promise.resolve(recorder.reset());
       if (message.type === 'SYNC_PERSONAL_TOOLS') {
         return syncPersonalTools().then(() => ({ accepted: true }));
+      }
+      if (message.type === 'EXECUTE_NATIVE_TOOL_DIRECT') {
+        const invocationId = crypto.randomUUID();
+        const nodeId = 'direct';
+        return new Promise<JsonValue>((resolve, reject) => {
+          const key = `${invocationId}:${nodeId}`;
+          const timeoutId = window.setTimeout(() => {
+            pendingNativeExecutions.delete(key);
+            reject(new Error('Native WebMCP tool execution timed out after 30 seconds.'));
+          }, 30_000);
+          pendingNativeExecutions.set(key, { resolve, reject, timeoutId });
+          postCommand('EXECUTE_NATIVE_TOOL', {
+            invocationId,
+            nodeId,
+            toolName: message.toolName,
+            input: message.input,
+          });
+        });
       }
       if (message.type === 'EXECUTE_TOOL_WORKFLOW') {
         const controller = new AbortController();
@@ -377,6 +407,7 @@ export default defineContentScript({
 
     window.addEventListener('pagehide', () => {
       window.clearInterval(navigationTimer);
+      if (personalSyncTimer !== undefined) window.clearTimeout(personalSyncTimer);
       for (const controller of activeExecutions.values()) controller.abort();
       activeExecutions.clear();
       for (const pending of pendingNativeExecutions.values()) {

@@ -12,6 +12,7 @@ export interface DemoInvoice {
 
 export const demoInvoices: DemoInvoice[] = [
   { id: 'INV-2048', vendor: 'Northstar Paper Co.', issuedAt: '2026-08-21', dueAt: '2026-09-20', amount: 4280, status: 'Unpaid', reference: 'Monthly stock' },
+  { id: 'INV-2045', vendor: 'Cobalt Safety Group', issuedAt: '2026-08-20', dueAt: '2026-09-19', amount: 5320, status: 'Unpaid', reference: 'Site safety replenishment' },
   { id: 'INV-2041', vendor: 'Acme Industrial Supply', issuedAt: '2026-08-18', dueAt: '2026-09-17', amount: 6850, status: 'Unpaid', reference: 'Safety equipment' },
   { id: 'INV-2039', vendor: 'Harborline Logistics', issuedAt: '2026-08-16', dueAt: '2026-09-15', amount: 2460, status: 'Unpaid', reference: 'Dock transfer fees' },
   { id: 'INV-2034', vendor: 'Kestrel Office Works', issuedAt: '2026-08-10', dueAt: '2026-09-09', amount: 1190, status: 'Paid', reference: 'Workspace supplies' },

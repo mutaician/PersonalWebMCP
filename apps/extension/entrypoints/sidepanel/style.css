@@ -130,3 +130,55 @@ code { font-family: ui-monospace, monospace; }
   .runner-fields { grid-template-columns: 1fr; }
   .contract-form .wide-field { grid-column: 1; }
 }
+
+/* Legibility pass: the side panel is a working surface, not a thumbnail. */
+body { font-size: 13px; }
+.overline { font-size: 10px; }
+h1 { font-size: 18px; }
+h2 { font-size: 15px; }
+.support, .site-row span, .bridge-heading p, .permission-card > p:not(.overline), .hint, .empty-copy, .empty-state p, .tool-card > p, .runner-note { font-size: 12px; }
+nav button, .text-button { font-size: 11px; }
+.site-row strong { font-size: 15px; }
+dl div, .compact-list div { font-size: 12px; }
+.primary-button { min-height: 40px; font-size: 13px; }
+.tool-card summary strong, .empty-state strong, .recording-banner strong { font-size: 13px; }
+.tool-card summary code, .bridge-heading p, .recording-banner p { font-size: 11px; }
+.provenance, .capture-number, .safe-badge { font-size: 9px; }
+.runner-fields { gap: 10px; }
+.runner-fields label, .value-choice label, .contract-form label { font-size: 11px; }
+.runner-fields input, .runner-fields select, .value-choice input, .contract-form input, .contract-form select, .contract-form textarea { min-height: 38px; font-size: 12px; }
+.runner-fields label small { color: #778179; font-size: 10px; font-weight: 500; line-height: 1.35; text-transform: none; }
+.runner-fields em { font-size: 9px; }
+.runner-fields .wide-field { grid-column: 1 / -1; }
+.runner-fields select { width: 100%; min-width: 0; border: 1px solid #c9cbbd; border-radius: 7px; padding: 7px 8px; background: white; color: #17211b; }
+.enum-checks { display: flex !important; flex-wrap: wrap; justify-content: flex-start !important; gap: 8px !important; border: 1px solid #c9cbbd; border-radius: 7px; padding: 9px; background: white; text-transform: none; }
+.enum-checks > span { display: inline-flex !important; align-items: center; justify-content: flex-start !important; gap: 5px !important; }
+.enum-checks input { width: 16px; height: 16px; min-height: 0; padding: 0; accent-color: #176b45; }
+.run-result { font-size: 11px !important; line-height: 1.45; }
+.contract-details > summary, .tool-card .contract-details > summary { font-size: 11px; }
+.capture-step strong { font-size: 12px; }
+.capture-step p, .review-heading span, .compiler-heading p:last-child, .workflow-preview li, .contract-summary div { font-size: 10px; }
+.capture-step-title code, .workflow-preview li code { font-size: 9px; }
+.remove-step { font-size: 10px; }
+.recording-actions button, .compile-actions > button:first-child { min-height: 40px; font-size: 12px; }
+.workflow-preview summary { font-size: 11px; }
+
+.toast { position: sticky; z-index: 20; top: 8px; display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 9px; margin: -10px 0 16px; padding: 10px 11px; border: 1px solid #b8c2b9; border-radius: 10px; background: #fffdf7; box-shadow: 0 8px 24px rgb(37 50 42 / 14%); }
+.toast > span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; background: #e7ece8; font-weight: 800; }
+.toast p { margin: 0; font-size: 12px; line-height: 1.4; }
+.toast button { border: 0; padding: 3px; background: transparent; color: #6c786e; font-size: 18px; }
+.toast.success { border-color: #9dc9ae; background: #eef8f1; }.toast.success > span { background: #d5eedf; color: #176b45; }
+.toast.error { border-color: #dfad97; background: #fff3ed; }.toast.error > span { background: #f8ded2; color: #a63d20; }
+.toast.info { border-color: #b7c3d5; background: #f2f6fb; }.toast.info > span { background: #dfe8f3; color: #315c87; }
+
+.connection-status { display: grid; gap: 3px; margin: 0 0 11px; padding: 10px 11px; border-radius: 8px; font-size: 11px; line-height: 1.4; }
+.connection-status span { color: inherit; opacity: .84; }
+.connection-status.running { background: #f2f6fb; color: #315c87; }
+.connection-status.succeeded { background: #e6f4ea; color: #176b45; }
+.connection-status.failed { background: #fff0e9; color: #a63d20; }
+.native-result { margin: 9px 12px 0 !important; border-radius: 7px; background: #202820 !important; color: #e8eee9 !important; }
+
+.value-mode-field { grid-column: 1 / -1; display: grid; gap: 6px; color: #667168; font-size: 11px; font-weight: 700; }
+.value-mode-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.value-mode-buttons button { min-height: 38px; border: 1px solid #cfd2c6; border-radius: 7px; background: white; color: #526057; font-size: 11px; font-weight: 700; }
+.value-mode-buttons button.active { border-color: #176b45; background: #e8f3ec; color: #176b45; box-shadow: inset 0 0 0 1px #176b45; }

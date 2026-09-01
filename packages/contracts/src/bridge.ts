@@ -104,6 +104,11 @@ export interface ActiveTabSnapshot {
   revisions: import('./models').ToolRevision[];
   teachSession: import('./models').TeachSessionSnapshot;
   activeExecution?: import('./models').ToolExecutionState;
+  connectionCheck?: {
+    state: 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+    message: string;
+    checkedAt: number;
+  };
   enabled: boolean;
   origin?: string;
   path?: string;

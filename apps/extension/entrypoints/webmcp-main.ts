@@ -39,6 +39,10 @@ export default defineUnlistedScript(() => {
   let tabSessionId = '';
   let registrationController: AbortController | undefined;
   let stopWatchingTools: () => void = () => undefined;
+  let catalogTimer: number | undefined;
+  let catalogPublishing = false;
+  let catalogPublishQueued = false;
+  let syncingPersonalTools = false;
   const personalRegistrations = new Map<string, { signature: string; controller: AbortController }>();
   const pendingInvocations = new Map<string, {
     resolve: (result: JsonValue) => void;
@@ -103,37 +107,42 @@ export default defineUnlistedScript(() => {
   };
 
   const syncPersonalTools = async (registrations: PersonalToolRegistration[]) => {
+    syncingPersonalTools = true;
     const nextIds = new Set(registrations.map((registration) => registration.id));
-    for (const [toolId, registered] of personalRegistrations) {
-      if (!nextIds.has(toolId)) {
-        registered.controller.abort();
-        personalRegistrations.delete(toolId);
+    try {
+      for (const [toolId, registered] of personalRegistrations) {
+        if (!nextIds.has(toolId)) {
+          registered.controller.abort();
+          personalRegistrations.delete(toolId);
+        }
       }
-    }
 
-    if (!isWebMcpSupported()) return;
-    for (const registration of registrations) {
-      const signature = JSON.stringify(registration);
-      const current = personalRegistrations.get(registration.id);
-      if (current?.signature === signature && !current.controller.signal.aborted) continue;
-      current?.controller.abort();
+      if (!isWebMcpSupported()) return;
+      for (const registration of registrations) {
+        const signature = JSON.stringify(registration);
+        const current = personalRegistrations.get(registration.id);
+        if (current?.signature === signature && !current.controller.signal.aborted) continue;
+        current?.controller.abort();
 
-      const controller = new AbortController();
-      try {
-        await registerPersonalTool(
-          registration,
-          (input, signal) => invokePersonalTool(registration, input, signal),
-          controller.signal,
-        );
-        personalRegistrations.set(registration.id, { signature, controller });
-      } catch (error) {
-        controller.abort();
-        postEvent('STATUS', statusPayload({
-          error: error instanceof Error ? error.message : `Could not register ${registration.title}.`,
-        }));
+        const controller = new AbortController();
+        try {
+          await registerPersonalTool(
+            registration,
+            (input, signal) => invokePersonalTool(registration, input, signal),
+            controller.signal,
+          );
+          personalRegistrations.set(registration.id, { signature, controller });
+        } catch (error) {
+          controller.abort();
+          postEvent('STATUS', statusPayload({
+            error: error instanceof Error ? error.message : `Could not register ${registration.title}.`,
+          }));
+        }
       }
+    } finally {
+      syncingPersonalTools = false;
+      scheduleCatalogPublish();
     }
-    await publishCatalog();
   };
 
   const statusPayload = (overrides: Partial<WebMcpStatusPayload> = {}): WebMcpStatusPayload => ({
@@ -146,6 +155,12 @@ export default defineUnlistedScript(() => {
   });
 
   const publishCatalog = async () => {
+    if (catalogPublishing) {
+      catalogPublishQueued = true;
+      return;
+    }
+    catalogPublishing = true;
+    try {
     const supported = isWebMcpSupported();
     const tools = supported ? await discoverWebMcpTools() : [];
     postEvent('CATALOG', {
@@ -154,6 +169,25 @@ export default defineUnlistedScript(() => {
       url: window.location.href,
       tools,
     } satisfies ToolCatalogPayload);
+    } finally {
+      catalogPublishing = false;
+      if (catalogPublishQueued) {
+        catalogPublishQueued = false;
+        scheduleCatalogPublish();
+      }
+    }
+  };
+
+  const scheduleCatalogPublish = (delay = 80) => {
+    if (catalogTimer !== undefined) window.clearTimeout(catalogTimer);
+    catalogTimer = window.setTimeout(() => {
+      catalogTimer = undefined;
+      void publishCatalog().catch((error) => {
+        postEvent('STATUS', statusPayload({
+          error: error instanceof Error ? error.message : 'Tool discovery failed.',
+        }));
+      });
+    }, delay);
   };
 
   const initialize = async () => {
@@ -172,7 +206,9 @@ export default defineUnlistedScript(() => {
     try {
       const registered = await registerPersonalPing(controller.signal);
       registrationController = registered ? controller : undefined;
-      stopWatchingTools = watchWebMcpToolChanges(() => void publishCatalog());
+      stopWatchingTools = watchWebMcpToolChanges(() => {
+        if (!syncingPersonalTools) scheduleCatalogPublish();
+      });
       postEvent('STATUS', statusPayload({ registered }));
       await publishCatalog();
     } catch (error) {
@@ -263,6 +299,8 @@ export default defineUnlistedScript(() => {
         input: Record<string, JsonValue>;
       });
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'WITHDRAW_PING') {
+      if (catalogTimer !== undefined) window.clearTimeout(catalogTimer);
+      catalogTimer = undefined;
       stopWatchingTools();
       stopWatchingTools = () => undefined;
       registrationController?.abort();
@@ -274,6 +312,8 @@ export default defineUnlistedScript(() => {
 
   const dispose = () => {
     window.removeEventListener('message', onMessage);
+    if (catalogTimer !== undefined) window.clearTimeout(catalogTimer);
+    catalogTimer = undefined;
     stopWatchingTools();
     registrationController?.abort();
     registrationController = undefined;
