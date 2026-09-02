@@ -19,7 +19,7 @@ interface RegisteredToolLike {
   name: string;
   title?: string;
   description?: string;
-  inputSchema?: Record<string, unknown>;
+  inputSchema?: Record<string, unknown> | string;
   annotations?: { readOnlyHint?: boolean; untrustedContentHint?: boolean };
   origin?: string;
 }
@@ -44,8 +44,6 @@ interface ModelContextLike extends EventTarget {
   ) => Promise<unknown>;
 }
 
-let executionInputMode: 'object' | 'json-string' | undefined;
-
 function getModelContext(): ModelContextLike | undefined {
   return (document as Document & { modelContext?: ModelContextLike }).modelContext;
 }
@@ -55,6 +53,13 @@ export function isWebMcpSupported(): boolean {
 }
 
 function cloneSerializableRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === 'string') {
+    try {
+      return cloneSerializableRecord(JSON.parse(value));
+    } catch {
+      return undefined;
+    }
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   try {
     return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
@@ -181,28 +186,7 @@ export async function executePersonalPing(signal?: AbortSignal): Promise<unknown
   const tool = tools.find((candidate) => candidate.name === PERSONAL_PING_TOOL_NAME);
   if (!tool) throw new Error(`${PERSONAL_PING_TOOL_NAME} is not registered.`);
 
-  const options = signal ? { signal } : undefined;
-  if (executionInputMode === 'json-string') {
-    return modelContext.executeTool(tool, '{}', options);
-  }
-
-  try {
-    const result = await modelContext.executeTool(tool, {}, options);
-    executionInputMode = 'object';
-    return result;
-  } catch (objectInputError) {
-    if (executionInputMode === 'object') throw objectInputError;
-
-    // The connection check is deliberately read-only, so it is safe to probe
-    // the older Chrome JSON-string input shape once for this page session.
-    try {
-      const result = await modelContext.executeTool(tool, '{}', options);
-      executionInputMode = 'json-string';
-      return result;
-    } catch {
-      throw objectInputError;
-    }
-  }
+  return modelContext.executeTool(tool, '{}', signal ? { signal } : undefined);
 }
 
 export async function executeWebMcpTool(
@@ -212,15 +196,12 @@ export async function executeWebMcpTool(
 ): Promise<unknown> {
   const modelContext = getModelContext();
   if (!modelContext) throw new Error('WebMCP is unavailable on this page.');
-  if (executionInputMode === undefined && toolName !== PERSONAL_PING_TOOL_NAME) {
-    await executePersonalPing(signal);
-  }
   const tools = await modelContext.getTools();
   const tool = tools.find((candidate) => candidate.name === toolName);
   if (!tool) throw new Error(`Native WebMCP tool “${toolName}” is not registered.`);
   return modelContext.executeTool(
     tool,
-    executionInputMode === 'json-string' ? JSON.stringify(input) : input,
+    JSON.stringify(input),
     signal ? { signal } : undefined,
   );
 }

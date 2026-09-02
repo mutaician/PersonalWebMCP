@@ -63,7 +63,7 @@ export function createSystemPingTrace(now = new Date().toISOString()): Interacti
     source: 'SYSTEM',
     origin: 'http://localhost:3000',
     path: '/',
-    pageTitle: 'PersonalWebMCP — Teach the web once',
+    pageTitle: 'PersonalWebMCP — Teach missing actions once',
     startedAt: now,
     finishedAt: now,
     status: 'COMPLETED',

@@ -13,6 +13,7 @@ interface ArgumentDraft {
   parameterName: string;
   value: JsonValue;
   schema: Record<string, unknown>;
+  required: boolean;
 }
 
 interface CompositeStepDraft {
@@ -57,6 +58,7 @@ function defaultFor(schema: Record<string, unknown>): JsonValue {
 }
 
 function stepFor(tool: DiscoveredWebMcpTool): CompositeStepDraft {
+  const required = new Set(Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required.filter((name): name is string => typeof name === 'string') : []);
   return {
     id: crypto.randomUUID(),
     tool,
@@ -65,6 +67,7 @@ function stepFor(tool: DiscoveredWebMcpTool): CompositeStepDraft {
       parameterName: name,
       value: defaultFor(schema),
       schema,
+      required: required.has(name),
     }])),
   };
 }
@@ -92,8 +95,17 @@ function parseValue(raw: string, schema: Record<string, unknown>): JsonValue {
 
 function ValueEditor({ argument, onChange }: { argument: ArgumentDraft; onChange: (value: JsonValue) => void }) {
   const choices = Array.isArray(argument.schema.enum) ? argument.schema.enum.filter((value): value is string => typeof value === 'string') : [];
+  const itemSchema = argument.schema.items && typeof argument.schema.items === 'object' && !Array.isArray(argument.schema.items) ? argument.schema.items as Record<string, unknown> : undefined;
+  const arrayChoices = Array.isArray(itemSchema?.enum) ? itemSchema.enum.filter((value): value is string => typeof value === 'string') : [];
   if (choices.length > 0) {
-    return <select value={String(argument.value)} onChange={(event) => onChange(event.target.value)}>{choices.map((choice) => <option key={choice}>{choice}</option>)}</select>;
+    return <span className="enum-choices compact-choices" role="radiogroup">{choices.map((choice) => <button className={argument.value === choice ? 'active' : ''} type="button" role="radio" aria-checked={argument.value === choice} onClick={() => onChange(choice)} key={choice}>{choice}</button>)}</span>;
+  }
+  if (arrayChoices.length > 0) {
+    const selected = new Set(Array.isArray(argument.value) ? argument.value.map(String) : []);
+    return <span className="enum-choices compact-choices multi-choices">{arrayChoices.map((choice) => <button className={selected.has(choice) ? 'active' : ''} type="button" aria-pressed={selected.has(choice)} onClick={() => { const next = new Set(selected); if (next.has(choice)) next.delete(choice); else next.add(choice); onChange([...next]); }} key={choice}>{choice}</button>)}</span>;
+  }
+  if (argument.schema.type === 'boolean') {
+    return <span className="enum-choices compact-choices" role="radiogroup"><button className={argument.value === true ? 'active' : ''} type="button" role="radio" aria-checked={argument.value === true} onClick={() => onChange(true)}>Yes</button><button className={argument.value === false ? 'active' : ''} type="button" role="radio" aria-checked={argument.value === false} onClick={() => onChange(false)}>No</button></span>;
   }
   return (
     <input
@@ -169,13 +181,19 @@ export function ComposePanel({
     try {
       const now = new Date().toISOString();
       const properties: Record<string, Record<string, unknown>> = {};
+      const requiredParameters = new Set<string>();
       const nodes: WorkflowNode[] = steps.map((step, index) => {
         const argumentsConfig: Record<string, JsonValue> = {};
         for (const [argumentName, argument] of Object.entries(step.arguments)) {
+          const parameterName = argument.parameterName.trim();
+          if (argument.mode === 'PARAMETER' && !parameterName) throw new Error(`${step.tool.title}: ${argumentName.replaceAll('_', ' ')} needs an agent input name.`);
           argumentsConfig[argumentName] = argument.mode === 'PARAMETER'
-            ? { mode: 'PARAMETER', parameterName: argument.parameterName, value: argument.value }
+            ? { mode: 'PARAMETER', parameterName, value: argument.value }
             : { mode: 'FIXED', value: argument.value };
-          if (argument.mode === 'PARAMETER') properties[argument.parameterName] = { ...argument.schema, default: argument.value };
+          if (argument.mode === 'PARAMETER') {
+            properties[parameterName] = { ...argument.schema, default: argument.value };
+            if (argument.required) requiredParameters.add(parameterName);
+          }
         }
         const config: Record<string, JsonValue> = step.confirmation
           ? { summary: 'Review the selected itinerary, fare, seat preference and shortlist state on the visible page.' }
@@ -196,7 +214,7 @@ export function ComposePanel({
         title: title.trim(),
         description: `Apply ${steps.length} saved steps by composing website-owned and personal WebMCP capabilities.`,
         scope: { origin, pathRules: [{ kind: 'PREFIX', value: path || '/' }], prerequisites: ['document.modelContext', ...steps.filter((step) => !step.personalTool && !step.confirmation).map((step) => step.tool.name)] },
-        inputSchema: { type: 'object', properties, additionalProperties: false },
+        inputSchema: { type: 'object', properties, required: [...requiredParameters], additionalProperties: false },
         annotations: { readOnlyHint: false, untrustedContentHint: false, riskClass: hasConfirmation ? 'CONSEQUENTIAL' : 'REVERSIBLE_WRITE' },
         provenance: { type: 'COMPOSITE', createdAt: now, nativeDependencies: steps.filter((step) => !step.personalTool && !step.confirmation).map((step) => step.tool.name), repairHistory: [] },
         workflowGraph: {
@@ -235,7 +253,8 @@ export function ComposePanel({
               {Object.entries(step.arguments).map(([argumentName, argument]) => (
                 <div className="compose-argument" key={argumentName}>
                   <label>{argumentName.replaceAll('_', ' ')}<ValueEditor argument={argument} onChange={(value) => updateArgument(step.id, argumentName, { value })} /></label>
-                  <label>Agent control<select value={argument.mode} onChange={(event) => updateArgument(step.id, argumentName, { mode: event.target.value as ValueMode })}><option value="FIXED">Remember this</option><option value="PARAMETER">Expose parameter</option></select></label>
+                  <div className="compose-choice-field"><span>Agent control</span><div className="value-mode-buttons"><button className={argument.mode === 'FIXED' ? 'active' : ''} type="button" onClick={() => updateArgument(step.id, argumentName, { mode: 'FIXED' as ValueMode })}>Remember</button><button className={argument.mode === 'PARAMETER' ? 'active' : ''} type="button" onClick={() => updateArgument(step.id, argumentName, { mode: 'PARAMETER' as ValueMode })}>Agent input</button></div></div>
+                  {argument.mode === 'PARAMETER' && <label>Agent input name<input value={argument.parameterName} onChange={(event) => updateArgument(step.id, argumentName, { parameterName: event.target.value })} /></label>}
                 </div>
               ))}
             </div>

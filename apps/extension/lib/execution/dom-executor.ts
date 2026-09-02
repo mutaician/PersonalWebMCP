@@ -10,6 +10,7 @@ import type {
   SemanticLocator,
   WorkflowNode,
 } from '@personal-webmcp/contracts';
+import { normalizeSemanticLocator, stableSemanticText } from '@personal-webmcp/engine';
 
 interface ResolvedElement {
   element: HTMLElement;
@@ -60,7 +61,7 @@ export type HumanConfirmationExecutor = (
 ) => Promise<void>;
 
 function normalized(value: string | null | undefined): string {
-  return value?.replace(/\s+/g, ' ').trim().toLowerCase() ?? '';
+  return stableSemanticText(value)?.replace(/\s+/g, ' ').trim().toLowerCase() ?? '';
 }
 
 function semanticMatches(expected: string | undefined, actual: string): boolean {
@@ -152,7 +153,7 @@ function locatorForElement(element: HTMLElement, original: SemanticLocator): Sem
   const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
     ? element.placeholder || undefined
     : undefined;
-  return {
+  return normalizeSemanticLocator({
     role: inferredRole(element),
     accessibleName: accessibleText(element) || undefined,
     label: labelText(element) || undefined,
@@ -169,7 +170,7 @@ function locatorForElement(element: HTMLElement, original: SemanticLocator): Sem
     path: `${window.location.pathname}${window.location.search}`,
     pageTitle: document.title,
     expectedOutcome: original.expectedOutcome,
-  };
+  });
 }
 
 function isVisible(element: Element): element is HTMLElement {
@@ -281,7 +282,9 @@ async function waitForResolvedElement(
     if (candidates.length > 0) lastCandidates = candidates;
     const best = candidates[0];
     const margin = best ? best.score - (candidates[1]?.score ?? 0) : 0;
-    if (best && best.score >= 85 && margin >= 15) {
+    // Exact role/name and label agreement is strong enough to survive a DOM
+    // redesign even when IDs and surrounding containers changed.
+    if (best && best.score >= 70 && margin >= 20) {
       const fallback = safeQuery(locator.fallbackSelector);
       const repaired = fallback !== best.element;
       return {
@@ -376,6 +379,18 @@ function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement | HTMLSe
   element.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+function controlHasValue(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, expected: JsonValue): boolean {
+  if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
+    return element.checked === Boolean(expected);
+  }
+  if (element instanceof HTMLSelectElement) {
+    const selected = element.selectedOptions[0];
+    return normalized(element.value) === normalized(String(expected))
+      || normalized(selected?.textContent) === normalized(String(expected));
+  }
+  return String(element.value) === String(expected);
+}
+
 function recordResolution(context: ExecutionContext, node: WorkflowNode, resolved: ResolvedElement): void {
   context.selectedLocators.push({ nodeId: node.id, strategy: resolved.strategy, score: resolved.score, repaired: resolved.repaired });
   if (resolved.repaired && resolved.nextLocator) {
@@ -398,13 +413,102 @@ async function executeDomValueNode(node: WorkflowNode, context: ExecutionContext
   await focusTarget(resolved.element, signal);
   const value = valueForNode(node, context.input);
   setNativeValue(resolved.element, value);
+  if (!controlHasValue(resolved.element, value)) {
+    throw new Error(`${node.label} did not retain the requested value “${String(value)}”.`);
+  }
   recordResolution(context, node, resolved);
   await settle(signal);
 }
 
-async function executeActivationNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal): Promise<void> {
+function expectedNavigationPath(node: WorkflowNode): string | undefined {
+  const expected = node.config.expectedOutcome;
+  if (typeof expected === 'string' && expected.startsWith('path-prefix:')) return expected.slice('path-prefix:'.length);
+  if (typeof expected === 'string' && expected.startsWith('path:')) return expected.slice('path:'.length);
+  return undefined;
+}
+
+function firstVisibleResultRow(locator: SemanticLocator): HTMLElement | undefined {
+  const direct = safeQuery(locator.fallbackSelector);
+  if (direct && (direct instanceof HTMLTableRowElement || direct.getAttribute('role') === 'row')) return direct;
+  return [...document.querySelectorAll('tbody tr, [role="row"]')]
+    .find((element): element is HTMLElement => !element.closest('thead') && isVisible(element));
+}
+
+function firstVisibleNavigationLink(path: string | undefined): HTMLAnchorElement | undefined {
+  if (!path) return undefined;
+  return [...document.querySelectorAll('a[href]')]
+    .find((element): element is HTMLAnchorElement => {
+      if (!(element instanceof HTMLAnchorElement) || !isVisible(element)) return false;
+      try {
+        return new URL(element.href, window.location.href).pathname.startsWith(path);
+      } catch {
+        return false;
+      }
+    });
+}
+
+async function executeOpenFirstMatchingResult(
+  node: WorkflowNode,
+  context: ExecutionContext,
+  signal: AbortSignal,
+): Promise<void> {
+  const resultLocator = locatorFromNode(node);
+  const expectedPath = expectedNavigationPath(node);
+  const resultRow = firstVisibleResultRow(resultLocator);
+
+  if (resultRow) {
+    await focusTarget(resultRow, signal);
+    resultRow.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    await settle(signal);
+  }
+
+  let openTarget: HTMLElement | undefined = firstVisibleNavigationLink(expectedPath);
+  const configuredOpenLocator = node.config.openLocator;
+  if (!openTarget && configuredOpenLocator && typeof configuredOpenLocator === 'object' && !Array.isArray(configuredOpenLocator)) {
+    openTarget = (await waitForResolvedElement(configuredOpenLocator as unknown as SemanticLocator, signal, 1600, node)).element;
+  }
+
+  if (!openTarget) {
+    throw new Error('No matching result is visible. Check the tool parameters or open the recorded results surface, then try again.');
+  }
+
+  await focusTarget(openTarget, signal);
+  context.selectedLocators.push({
+    nodeId: node.id,
+    strategy: resultRow ? 'intent:first-result-then-open' : 'intent:first-result-link',
+    score: 100,
+    repaired: false,
+  });
+
+  if (openTarget instanceof HTMLAnchorElement && openTarget.href) {
+    context.pendingNavigation = openTarget.href;
+    return;
+  }
+  openTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  await settle(signal);
+}
+
+async function executeApplyFilters(
+  node: WorkflowNode,
+  context: ExecutionContext,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    await executeActivationNode(node, context, signal, 900);
+  } catch (error) {
+    if (!(error instanceof RepairRequiredError) || error.request.candidates.length > 0) throw error;
+    context.selectedLocators.push({
+      nodeId: node.id,
+      strategy: 'intent:controls-auto-applied',
+      score: 100,
+      repaired: false,
+    });
+  }
+}
+
+async function executeActivationNode(node: WorkflowNode, context: ExecutionContext, signal: AbortSignal, timeoutMs = 5000): Promise<void> {
   const locator = locatorFromNode(node);
-  const resolved = await waitForResolvedElement(locator, signal, 5000, node);
+  const resolved = await waitForResolvedElement(locator, signal, timeoutMs, node);
   await focusTarget(resolved.element, signal);
   recordResolution(context, node, resolved);
   if (resolved.element instanceof HTMLAnchorElement && resolved.element.href) {
@@ -430,6 +534,10 @@ function outcomeSatisfied(expected: string, context: ExecutionContext): boolean 
   if (expected.startsWith('url:')) {
     const url = expected.slice('url:'.length);
     return context.pendingNavigation === url || window.location.href === url;
+  }
+  if (expected.startsWith('text-appears:')) {
+    const text = normalized(expected.slice('text-appears:'.length));
+    return Boolean(text && normalized(document.body.textContent).includes(text));
   }
   return false;
 }
@@ -543,7 +651,13 @@ export async function executePersonalToolOnPage(
     } else if (node.type === 'DOM_INPUT' || node.type === 'DOM_SELECT') {
       await executeDomValueNode(node, context, signal);
     } else if (node.type === 'DOM_ACTIVATE') {
-      await executeActivationNode(node, context, signal);
+      if (node.config.intent === 'OPEN_FIRST_MATCHING_RESULT') {
+        await executeOpenFirstMatchingResult(node, context, signal);
+      } else if (node.config.intent === 'APPLY_FILTERS') {
+        await executeApplyFilters(node, context, signal);
+      } else {
+        await executeActivationNode(node, context, signal);
+      }
     } else if (node.type === 'WAIT_FOR') {
       await executeWaitNode(node, context, signal);
     } else if (node.type === 'EXTRACT') {

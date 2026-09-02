@@ -1,177 +1,146 @@
-# PersonalWebMCP guided manual verification
+# PersonalWebMCP manual verification
 
-This is the browser test guide for the current implementation. Automated checks only prove that the TypeScript, demo, and extension packages build; they do not prove WebMCP behavior.
+This guide is for anyone evaluating the repository or preparing a release. It verifies the product in a real WebMCP-enabled browser; the TypeScript and build checks alone cannot prove tool registration or visible execution.
 
-## Test environment
+## Before testing
 
-- Chromium 149 or newer.
-- `chrome://flags/#enable-webmcp-testing` enabled, followed by a full browser restart.
-- Demo running at `http://localhost:3000` with `pnpm dev:demo`, or the current deployed URL.
-- Unpacked extension loaded from `apps/extension/.output/chrome-mv3`.
-- Chrome DevTools → Application → WebMCP available on the tested page.
+You need:
 
-Use the DevTools WebMCP panel for deterministic registration and execution checks. Treat a natural-language call from an agent as a separate submission check: the inspector proves the tool works, but it is not itself an agent.
+- the current PersonalWebMCP extension build loaded unpacked;
+- Chrome/Chromium with `chrome://flags/#enable-webmcp-testing` enabled;
+- the [live demo](https://personal-webmcp.mutaician.chatgpt.site) or `http://localhost:3000`;
+- optionally, Chrome's [Model Context Tool Inspector](https://chromewebstore.google.com/detail/webmcp-model-context-tool/gbpdfapgefenggkahomfgkhfehlcenpd) for natural-language agent calls.
 
-## Clean reset
+Build the project before a release check:
 
-1. Open `chrome://extensions`.
-2. Remove PersonalWebMCP to clear its local registry, revisions, receipts, and granted origins.
-3. Run `pnpm build` from the repository root.
-4. Select **Load unpacked** and choose `apps/extension/.output/chrome-mv3`.
-5. Open a fresh demo tab and grant access only when the side panel asks.
+```bash
+pnpm install
+pnpm typecheck
+pnpm build
+```
 
-For an ordinary code update that does not require clearing saved tools, use the extension card's **Reload** button and reload the demo tab.
+Load `apps/extension/.output/chrome-mv3` from `chrome://extensions`. After changing extension code, reload the extension and the tested page.
 
-## 1. Installation and permission boundary
+## 1. Installation and connection
 
-1. Open `http://localhost:3000` and the PersonalWebMCP side panel.
-2. Confirm the panel offers **Enable this site** before it reports the origin as enabled.
-3. Grant access and reload once if Chrome requests it.
-4. Confirm **Page API: Detected**, **Registration: Active**, and run **Run connection check**.
-5. Open another HTTP(S) origin that has not been enabled. Confirm the extension asks separately and does not expose saved localhost capabilities there.
+1. Open the demo homepage and the PersonalWebMCP side panel.
+2. Grant access only to the displayed origin.
+3. Reload the page once if Chrome requests it.
+4. Select **Run connection check**.
 
-Expected: `personal_ping` appears in DevTools and returns the visible page title and URL. No broad-origin permission is silently granted.
+Pass when the side panel reports that WebMCP is available and `personal_ping` completed. An unrelated origin must request permission separately.
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+Result: [ ] Pass  [ ] Fail
 
-## 2. Native discovery and live refresh
+## 2. Teach a capability on a legacy site
 
-1. Open `/configurator` and reload the page.
-2. In side panel → Tools, confirm five website-owned `configurator_*` tools appear.
-3. In DevTools → Application → WebMCP, invoke `configurator_set_product`, then size, finish, options, and quantity with valid arguments.
-4. Confirm each invocation changes the same visible configurator state as its matching human control.
-5. Navigate to `/travel` and confirm the catalog changes to `travel_search_trips` and `travel_get_trip_detail` without reinstalling the extension.
+1. Open `/legacy?module=invoices&variant=classic`.
+2. Confirm the side panel reports zero website-owned native tools.
+3. Start teaching and perform this visible workflow:
+   - Vendor: **Cobalt Safety Group**
+   - Status: **Unpaid**
+   - Minimum Amount: `1000`
+   - Sort: change to **Oldest First**, then back to **Newest First**
+   - Select the first result and open the record
+4. Finish teaching.
+5. Set `vendor` and `min_amount` to **Ask each run**. Keep status and sort remembered.
+6. Save the tool as `personal_open_latest_unpaid_invoice`.
+7. Navigate to another legacy module, such as Document Archive.
+8. Run the saved tool with Vendor `Acme Industrial Supply` and Minimum Amount `5000`.
 
-Expected: native tool discovery follows the visible document and `toolchange`/navigation updates do not leave configurator tools registered on the travel page.
+Pass when PersonalWebMCP restores the Invoice Register context, applies the new values, and opens `INV-2041`. The generated schema must contain the two agent inputs and must not hard-code a currency amount, invoice ID, or recorded result row.
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+Agent check:
 
-## 3. Legacy teach, compile, and parameterized run
+> Open the newest unpaid invoice from Acme Industrial Supply above $5,000.
 
-1. Open `/legacy`, choose **Invoice Register**, and clear all filters.
-2. Start teaching in the side panel.
-3. Set Vendor to **Cobalt Safety Group**, Status to **Unpaid**, Minimum Amount to `1000`, Sort By to **Newest First**, select the first result, and open it.
-4. Finish teaching. Keep Vendor and Minimum Amount as parameters; keep Status and Sort fixed.
-5. Name the tool `personal_open_latest_unpaid_invoice`, test the generated contract, and save it.
-6. Return to the exact starting surface: `/legacy` with **Invoice Register** visible and filters cleared.
-7. Run the saved tool with another vendor and amount that exist in the demo.
+Pass when the agent selects the personal tool and the invocation supplies structured `vendor` and `min_amount` arguments.
 
-Expected: one separately stored personal tool is registered through WebMCP, accepts typed inputs, visibly applies the filters, and opens the matching invoice. Starting from Dashboard or another module is currently expected to fail safely rather than invent navigation.
+Result: [ ] Pass  [ ] Fail
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+## 3. Personalize and extend native WebMCP tools
 
-## 4. Persistence and scope
+1. Open `/configurator` and reset the design.
+2. Confirm five website-owned `configurator_*` tools appear.
+3. Run at least one native tool from the side panel and confirm its typed input changes the visible design.
+4. Confirm the website has no native tool for **Add to project**.
+5. Teach only the **Add to project** action and save it as `personal_add_design_to_project`.
+6. Change the design so its price differs, then run the taught tool again.
 
-1. Reload `/legacy`; confirm the saved capability remains.
-2. Restart Chrome; reopen the permitted origin and confirm it remains available.
-3. Navigate to `/configurator`; confirm the legacy capability is not registered there when its path rule does not match.
-4. Return to `/legacy`; confirm it re-registers.
+Pass when the taught action still finds the button without depending on its changing price and the page reports `Design added to project board`.
 
-Expected: saved definitions persist locally and registration follows origin, path, health, and native prerequisites.
+Now create a composite:
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+1. Select **Start with all configurator tools**.
+2. Remember these values:
+   - Product: `studio-table`
+   - Size: `180`
+   - Finish: `walnut`
+   - Options: `cable-tray` and `monitor-shelf`
+3. Set Quantity to **Agent input** with input name `quantity`.
+4. Add the personal **Add current design to project** tool as the final step.
+5. Save as `personal_prepare_my_studio_workspace`.
+6. Reset the configurator and run it with Quantity `3`.
 
-## 5. Repair lifecycle
+Pass when the composite visibly applies every preference, sets quantity to three, and completes the taught project action. Its schema should expose only `quantity`, while its provenance lists native and personal dependencies.
 
-1. Create a short legacy invoice capability in the classic portal.
-2. Switch to **New Portal** and run it from the equivalent Invoices surface.
-3. Record whether the target is resolved automatically, offered as an approval candidate, or sent to guided selection.
-4. For an approval candidate, inspect its score evidence, approve it, and retest.
-5. For guided selection, choose the intended visible control, then retest.
-6. Restore an earlier revision and confirm a new current version is created.
+Agent check:
 
-Expected: high-confidence repair occurs only after validation; ambiguous targets wait for approval; unresolved targets do not click and become Broken/guided. Repair and restore actions appear in revision history.
+> Prepare my usual studio workspace for three people and add it to my project.
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+Pass when the agent invokes the composite with `{ "quantity": 3 }` and the complete visible workflow succeeds.
 
-## 6. Native configurator composition
+Result: [ ] Pass  [ ] Fail
 
-1. Open `/configurator` and side panel → Tools → Compose.
-2. Choose **Start with all configurator tools**.
-3. Set product, size, finish, and options as remembered values. Expose quantity as a parameter.
-4. Save as `personal_make_my_usual`.
-5. Reset the visible design, then run the personal capability with quantity `2`.
+## 4. Persistence, scope, and refresh
 
-Expected: the composite is marked COMPOSITE, lists its native dependencies, and visibly applies every saved preference through `document.modelContext.executeTool`.
+1. Reload the current page and confirm saved personal tools remain available.
+2. Save a new taught or composite tool and confirm it becomes runnable without manually reloading the page.
+3. Move between `/legacy`, `/configurator`, and `/travel`.
+4. Confirm tools register only where their origin, path, health, and native prerequisites match.
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+Pass when saved tools persist locally, the catalog refreshes after saving, and tools from one demo do not appear as executable on an unrelated path.
 
-## 7. Hybrid travel and human checkpoint
+Result: [ ] Pass  [ ] Fail
 
-1. Open `/travel`; confirm the two website-owned travel tools are present.
-2. Invoke `travel_search_trips` and `travel_get_trip_detail` once from DevTools. Confirm search state and the detail drawer update visibly.
-3. With the drawer open, teach only the missing UI behavior: choose a Seat preference and click **Save itinerary**. Compile it as a separate personal preference capability.
-4. In Tools → Compose, choose **Start hybrid trip flow**, add the learned preference capability, move it before **Review before booking**, and save `personal_prepare_my_trip`.
-5. Reset the travel page and run the composite.
-6. Confirm it pauses with a HUMAN CHECKPOINT in the side panel. Test **Reject** once and **Approve and continue** once.
+## 5. Semantic repair
 
-Expected: native search/detail tools do the site-owned work, only the missing seat/save interaction uses the learned capability, and execution cannot pass the checkpoint without a recorded human decision.
+1. Save a working invoice capability in the classic portal.
+2. Switch to **New Portal** and run it against the equivalent invoice workflow.
+3. Inspect the tool's version/repair information.
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+Pass when a high-confidence semantic match executes only after its outcome is verified. Ambiguous targets must wait for approval or guided selection; unresolved targets must stop rather than guess.
 
-## 8. Failure and cancellation behavior
+Result: [ ] Pass  [ ] Fail
 
-1. Invoke a saved tool with a required argument omitted, a number outside its schema range, and an undeclared argument.
-2. Run a legacy tool from the wrong module or path.
-3. Start a visible learned workflow and press **Cancel** before it finishes where timing permits.
-4. Begin guided repair, press Escape, and confirm page highlighting is removed.
+## 6. Safety and failure behavior
 
-Expected: invalid arguments are rejected before acting; missing targets do not trigger guessed clicks; cancellation stops remaining nodes; temporary overlays are cleaned up.
+Verify that:
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+- missing required inputs are rejected before execution;
+- cancellation stops remaining workflow steps;
+- consequential composites pause at their human confirmation step;
+- password, OTP, payment-card, token, and secret-like values are not retained in recorded tools or run summaries;
+- successful and failed runs produce readable side-panel feedback.
 
-## 9. Run feedback, provenance, and sensitive fields
+Result: [ ] Pass  [ ] Fail
 
-1. Confirm successful, failed, cancelled, approved, and rejected runs produce a visible toast in the side panel.
-2. Confirm tool cards show TAUGHT or COMPOSITE provenance, risk, health, version, and native dependencies.
-3. Start teaching on any page containing a password, OTP, or payment-card-style control. Interact with that field, then finish teaching.
-4. Confirm it is counted as sensitive/skipped and its value is absent from the captured workflow, generated contract, and locally stored receipt input summary.
+## 7. Public release check
 
-Expected: receipts remain local, human decisions are distinct from run status, and sensitive values never enter durable extension storage.
+Use a clean Chrome profile or another machine:
 
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
+1. Load the final extension build.
+2. Open the deployed URL in a fresh window.
+3. Grant that deployed origin.
+4. Repeat the connection check, one native invocation, and both agent prompts above.
+5. Confirm no localhost URL, cached login, existing storage, or private credential is required.
 
-## 10. Agent-call evidence for submission
+Result: [ ] Pass  [ ] Fail
 
-1. Use a Chrome agent surface that has WebMCP access; do not use DevTools invocation for this particular check.
-2. Keep the PersonalWebMCP side panel visible and open the correct starting page.
-3. Ask the agent to perform the capability by intent, without giving it DOM instructions or the tool name first.
-4. Capture the agent selecting and calling the personal tool, the visible page changing, and the returned result.
-5. For the travel composite, capture the agent waiting while the human approves the checkpoint.
+## Test record
 
-Suggested prompts:
-
-- “Configure my usual workspace for two desks.”
-- “Prepare my usual trip from Nairobi to Lisbon, but wait for me before continuing.”
-- “Open the latest unpaid Cobalt Safety Group invoice above $1,000.”
-
-Expected: at least one agent selects a registered personal capability from its name, description, and schema and completes it successfully. If Chrome currently exposes only the DevTools inspector in your account, mark this check blocked rather than treating an inspector click as agent evidence.
-
-Result: [ ] Pass  [ ] Fail  [ ] Blocked  Notes: __________________
-
-## 11. Clean-profile and live-link check
-
-1. Build and zip the extension from the final commit.
-2. On another Chrome profile or machine, enable WebMCP, install the unpacked build, and open the deployed URL in an incognito/fresh session.
-3. Grant the deployed origin, then repeat connection, one native invocation, and one personal invocation.
-4. Confirm no localhost URL, cached login, expired tunnel, or pre-existing extension storage is required.
-
-Expected: the public demo loads independently and the packaged extension can enable that exact origin.
-
-Result: [ ] Pass  [ ] Fail  Notes: ______________________________
-
-## Final record
-
-Chrome version: ____________________
-
-Extension commit: __________________
-
-Demo URL: __________________________
-
-Tester/date: ________________________
-
-Known failures to revisit after Step 13:
-
-1. ____________________________________________________________
-2. ____________________________________________________________
-3. ____________________________________________________________
+- Chrome version: ______________________________
+- Extension revision: __________________________
+- Demo URL: ___________________________________
+- Tester/date: _________________________________
+- Notes: ______________________________________

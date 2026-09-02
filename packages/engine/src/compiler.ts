@@ -8,6 +8,7 @@ import {
   type TraceStep,
   type WorkflowNode,
 } from '@personal-webmcp/contracts';
+import { normalizeTaughtSteps, stableSemanticText } from './intent';
 
 export type CapturedValueMode = 'FIXED' | 'PARAMETER';
 
@@ -26,7 +27,6 @@ export interface TaughtToolDraftOptions {
   description: string;
   pathPrefix: string;
   riskClass: RiskClass;
-  inputSchema?: JsonSchema;
   now?: string;
 }
 
@@ -65,17 +65,18 @@ export function suggestStepCompilationChoice(step: TraceStep): StepCompilationCh
 }
 
 export function suggestTaughtToolIdentity(trace: InteractionTrace) {
+  const normalizedSteps = normalizeTaughtSteps(trace.steps.filter((step) => step.type !== 'SKIPPED_SENSITIVE'));
+  const opensFirstResult = normalizedSteps.some((step) => step.intent === 'OPEN_FIRST_MATCHING_RESULT');
   const finalAction = [...trace.steps].reverse().find((step) => (
     step.type === 'ACTIVATE' || step.type === 'SUBMIT'
   ));
-  const rawTitle = finalAction?.locator?.label
+  const rawTitle = opensFirstResult
+    ? 'Open first matching result'
+    : finalAction?.locator?.label
     ?? finalAction?.locator?.accessibleName
     ?? finalAction?.locator?.nearbyText
     ?? 'Taught workflow';
-  const title = rawTitle
-    .replace(/\b(?:INV|PO|SR)-\d+\b/gi, '')
-    .replace(/[$€£]\s?[\d,.]+.*$/, '')
-    .replace(/\d[\d,. \s]*$/, '')
+  const title = (stableSemanticText(rawTitle) ?? 'Taught workflow')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 56) || 'Taught workflow';
@@ -84,7 +85,9 @@ export function suggestTaughtToolIdentity(trace: InteractionTrace) {
   return {
     webmcpName: `personal_${normalizeParameterName(title)}_${uniqueSuffix}`,
     title,
-    description: `Repeat the ${trace.steps.filter((step) => step.type !== 'SKIPPED_SENSITIVE').length}-step workflow taught on ${trace.pageTitle}.`,
+    description: opensFirstResult
+      ? 'Apply the recorded filters and open the first matching result. Agent inputs vary while remembered preferences stay fixed.'
+      : `Repeat the ${normalizedSteps.length}-action capability taught on ${trace.pageTitle}.`,
     pathPrefix,
   };
 }
@@ -121,10 +124,12 @@ export function compileTaughtWorkflow(
   const choiceByStep = new Map(choices.map((choice) => [choice.stepId, choice]));
   const capturedSteps = trace.steps.filter((step) => choiceByStep.get(step.id)?.include && step.type !== 'SKIPPED_SENSITIVE');
   if (capturedSteps.length === 0) throw new Error('Keep at least one captured interaction.');
+  const intentSteps = normalizeTaughtSteps(capturedSteps);
 
   const properties: Record<string, JsonSchema> = {};
   const required = new Set<string>();
-  const nodes: WorkflowNode[] = capturedSteps.map((step, index) => {
+  const nodes: WorkflowNode[] = intentSteps.map((intentStep, index) => {
+    const { step } = intentStep;
     const choice = choiceByStep.get(step.id) ?? suggestStepCompilationChoice(step);
     const config: Record<string, JsonValue> = {
       action: step.type,
@@ -132,6 +137,8 @@ export function compileTaughtWorkflow(
     };
     if (step.locator) config.locator = asJsonValue(step.locator);
     if (step.type === 'NAVIGATE' && step.value !== undefined) config.destination = asJsonValue(step.value);
+    if (intentStep.intent) config.intent = intentStep.intent;
+    if (intentStep.openLocator) config.openLocator = asJsonValue(intentStep.openLocator);
 
     if (hasCapturedValue(step)) {
       if (choice.valueMode === 'PARAMETER') {
@@ -154,12 +161,16 @@ export function compileTaughtWorkflow(
     return {
       id: `step-${index + 1}`,
       type: nodeTypeForStep(step),
-      label: step.locator?.accessibleName || step.locator?.label || `${step.type.toLowerCase()} step ${index + 1}`,
+      label: intentStep.intent === 'OPEN_FIRST_MATCHING_RESULT'
+        ? 'Open first matching result'
+        : intentStep.intent === 'APPLY_FILTERS'
+          ? 'Apply filters'
+          : step.locator?.accessibleName || step.locator?.label || `${step.type.toLowerCase()} step ${index + 1}`,
       config,
     };
   });
 
-  const finalExpectedOutcome = [...capturedSteps].reverse().find((step) => step.locator?.expectedOutcome)?.locator?.expectedOutcome;
+  const finalExpectedOutcome = [...intentSteps].reverse().find(({ step }) => step.locator?.expectedOutcome)?.step.locator?.expectedOutcome;
   if (finalExpectedOutcome) {
     nodes.push({
       id: `step-${nodes.length + 1}`,
@@ -175,7 +186,7 @@ export function compileTaughtWorkflow(
     required: [...required],
     additionalProperties: false,
   };
-  const inputSchema = options.inputSchema ?? generatedSchema;
+  const inputSchema = generatedSchema;
 
   return {
     id: options.id ?? crypto.randomUUID(),

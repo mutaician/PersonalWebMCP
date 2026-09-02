@@ -45,6 +45,9 @@ export function useConfiguratorWebMcp(actions: ConfiguratorActions): void {
     const modelContext = (document as Document & { modelContext?: ModelContextLike }).modelContext;
     if (!modelContext) return;
     const controllers: AbortController[] = [];
+    let documentLeaving = false;
+    const markDocumentLeaving = () => { documentLeaving = true; };
+    window.addEventListener('pagehide', markDocumentLeaving, { once: true });
     const register = async () => {
       const productIds = configuratorProducts.map((item) => item.id);
       const sizeIds = configuratorSizes.map((item) => item.id);
@@ -110,6 +113,9 @@ export function useConfiguratorWebMcp(actions: ConfiguratorActions): void {
       ok: false,
       error: error instanceof Error ? error.message : 'Native tool registration failed.',
     }));
-    return () => controllers.forEach((controller) => controller.abort());
+    return () => {
+      window.removeEventListener('pagehide', markDocumentLeaving);
+      if (!documentLeaving) controllers.forEach((controller) => controller.abort());
+    };
   }, [actions.setFinish, actions.setOptions, actions.setProduct, actions.setQuantity, actions.setSize]);
 }

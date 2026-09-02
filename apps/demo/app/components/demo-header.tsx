@@ -15,7 +15,14 @@ export function DemoHeader({ current, productName = 'PersonalWebMCP demos' }: De
         <a className={current === 'configurator' ? 'current' : ''} href="/configurator">Configurator</a>
         <a className={current === 'travel' ? 'current' : ''} href="/travel">Hybrid travel</a>
       </nav>
-      <span className="status-pill">Deterministic · Local</span>
+      <a
+        className="status-pill"
+        href="https://github.com/mutaician/PersonalWebMCP"
+        target="_blank"
+        rel="noreferrer"
+      >
+        GitHub ↗
+      </a>
     </header>
   );
 }

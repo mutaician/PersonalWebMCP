@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
-  JsonSchema,
   PersonalToolRecord,
   RiskClass,
   TeachSessionSnapshot,
@@ -103,7 +102,6 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
   const [preparedTraceId, setPreparedTraceId] = useState('');
   const [choices, setChoices] = useState<StepCompilationChoice[]>([]);
   const [draft, setDraft] = useState<DraftFields>(emptyDraft);
-  const [schemaText, setSchemaText] = useState('{}');
   const [testResult, setTestResult] = useState('');
   const trace = session.trace;
 
@@ -116,10 +114,8 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
       ...identity,
       riskClass: 'READ_ONLY',
     };
-    const compiled = compileTaughtWorkflow(trace, nextChoices, nextDraft);
     setChoices(nextChoices);
     setDraft(nextDraft);
-    setSchemaText(JSON.stringify(compiled.inputSchema, null, 2));
     setPreparedTraceId(trace.id);
     setTestResult('');
     setError('');
@@ -129,15 +125,21 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
     () => choices.filter((choice) => choice.include).length,
     [choices],
   );
-  const previewNodes = useMemo(() => {
-    if (!trace || trace.status !== 'COMPLETED') return [];
+  const generatedTool = useMemo(() => {
+    if (!trace || trace.status !== 'COMPLETED') return undefined;
     try {
-      const inputSchema = JSON.parse(schemaText) as JsonSchema;
-      return compileTaughtWorkflow(trace, choices, { ...draft, inputSchema }).workflowGraph.nodes;
+      return compileTaughtWorkflow(trace, choices, draft);
     } catch {
-      return [];
+      return undefined;
     }
-  }, [choices, draft, schemaText, trace]);
+  }, [choices, draft, trace]);
+  const schemaText = JSON.stringify(generatedTool?.inputSchema ?? {}, null, 2);
+  const previewNodes = generatedTool?.workflowGraph.nodes ?? [];
+  const compiledActions = previewNodes.filter((node) => node.type !== 'ASSERT');
+  const inferredIntents = compiledActions
+    .map((node) => node.config.intent)
+    .filter((intent): intent is string => typeof intent === 'string')
+    .map((intent) => intent === 'APPLY_FILTERS' ? 'Apply filters' : intent === 'OPEN_FIRST_MATCHING_RESULT' ? 'Open first matching result' : intent);
 
   const runRecorderCommand = async (type: 'START_TEACHING' | 'PAUSE_TEACHING' | 'RESUME_TEACHING' | 'CANCEL_TEACHING' | 'FINISH_TEACHING') => {
     setBusy(true);
@@ -173,13 +175,7 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
 
   const buildTool = (): PersonalToolRecord => {
     if (!trace || trace.status !== 'COMPLETED') throw new Error('Finish the teaching session before compiling.');
-    let inputSchema: JsonSchema;
-    try {
-      inputSchema = JSON.parse(schemaText) as JsonSchema;
-    } catch {
-      throw new Error('Input schema is not valid JSON.');
-    }
-    const tool = compileTaughtWorkflow(trace, choices, { ...draft, inputSchema });
+    const tool = compileTaughtWorkflow(trace, choices, draft);
     const validation = validateCompiledTool(tool);
     if (!validation.valid) throw new Error(validation.errors.join(' · '));
     return tool;
@@ -262,16 +258,17 @@ export function TeachPanel({ session, enabled, onSessionChange, onSaved }: Teach
       </div>
 
       <div className="compiler-heading"><p className="overline">GENERATED CONTRACT</p><h2>Independent personal tool</h2><p>This recording has its own unique name. Edit what the agent sees, which values vary, and which remain fixed.</p></div>
+      {generatedTool && <div className="compiler-insight"><strong>{includedStepCount} recorded events → {compiledActions.length} reusable actions</strong><span>{inferredIntents.length > 0 ? `Inferred intent: ${inferredIntents.join(' · ')}` : 'Stable semantic controls compiled from the recording.'}</span></div>}
       <div className="contract-form">
         <label>Tool name<input value={draft.webmcpName} onChange={(event) => updateDraft('webmcpName', event.target.value)} /></label>
         <label>Display title<input value={draft.title} onChange={(event) => updateDraft('title', event.target.value)} /></label>
         <label className="wide-field">Description<textarea rows={3} value={draft.description} onChange={(event) => updateDraft('description', event.target.value)} /></label>
         <label>Path scope<input value={draft.pathPrefix} onChange={(event) => updateDraft('pathPrefix', event.target.value)} /></label>
-        <label>Risk class<select value={draft.riskClass} onChange={(event) => updateDraft('riskClass', event.target.value as RiskClass)}><option value="READ_ONLY">Read only</option><option value="REVERSIBLE_WRITE">Reversible write</option><option value="CONSEQUENTIAL">Consequential</option></select></label>
-        <label className="wide-field">JSON Schema<textarea className="schema-editor" rows={12} spellCheck={false} value={schemaText} onChange={(event) => { setSchemaText(event.target.value); markDraftDirty(); }} /></label>
+        <div className="risk-choice-field"><span>Risk class</span><div className="value-mode-buttons risk-options" role="radiogroup" aria-label="Risk class">{([['READ_ONLY', 'Read only'], ['REVERSIBLE_WRITE', 'Reversible'], ['CONSEQUENTIAL', 'Consequential']] as const).map(([value, label]) => <button className={draft.riskClass === value ? 'active' : ''} type="button" role="radio" aria-checked={draft.riskClass === value} onClick={() => updateDraft('riskClass', value as RiskClass)} key={value}>{label}</button>)}</div></div>
+        <label className="wide-field">Generated JSON Schema<textarea className="schema-editor" rows={12} spellCheck={false} value={schemaText} readOnly /></label>
       </div>
       <dl className="contract-summary"><div><dt>Origin scope</dt><dd>{trace?.origin}</dd></div><div><dt>Prerequisite</dt><dd>document.modelContext</dd></div><div><dt>Read-only hint</dt><dd>{draft.riskClass === 'READ_ONLY' ? 'Yes' : 'No'}</dd></div><div><dt>Untrusted content</dt><dd>No</dd></div></dl>
-      <details className="workflow-preview"><summary>Workflow graph · {previewNodes.length} nodes</summary><ol>{previewNodes.map((node) => <li key={node.id}><code>{node.type}</code><span>{node.label}</span></li>)}</ol></details>
+      <details className="workflow-preview"><summary>Compiled capability · {previewNodes.length} nodes</summary><ol>{previewNodes.map((node) => <li key={node.id}><code>{node.type}</code><span>{node.label}</span></li>)}</ol></details>
       {error && <p className="notice error" role="alert">{error}</p>}
       {testResult && <p className="notice success-notice" role="status">{testResult}</p>}
       <div className="compile-actions"><button type="button" onClick={() => void testDraft()} disabled={busy}>Validate contract</button><button className="primary-button" type="button" onClick={() => void saveTool()} disabled={busy || !testResult}>{busy ? 'Working…' : 'Save personal tool'}</button></div>

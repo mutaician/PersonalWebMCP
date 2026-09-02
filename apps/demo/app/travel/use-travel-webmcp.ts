@@ -45,6 +45,9 @@ export function useTravelWebMcp(actions: TravelActions): void {
     if (!modelContext) return;
     const searchController = new AbortController();
     const detailController = new AbortController();
+    let documentLeaving = false;
+    const markDocumentLeaving = () => { documentLeaving = true; };
+    window.addEventListener('pagehide', markDocumentLeaving, { once: true });
     const airportCodes = demoAirports.map((airport) => airport.code);
     const tripIds = demoTrips.map((trip) => trip.id);
     const cabins = ['Economy', 'Premium economy', 'Business'];
@@ -126,8 +129,11 @@ export function useTravelWebMcp(actions: TravelActions): void {
       error: error instanceof Error ? error.message : 'Travel tool registration failed.',
     }));
     return () => {
-      searchController.abort();
-      detailController.abort();
+      window.removeEventListener('pagehide', markDocumentLeaving);
+      if (!documentLeaving) {
+        searchController.abort();
+        detailController.abort();
+      }
     };
   }, [actions.search, actions.showTrip]);
 }

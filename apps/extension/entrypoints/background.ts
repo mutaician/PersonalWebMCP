@@ -120,6 +120,16 @@ function recordedStartingPath(tool: PersonalToolRecord): string | undefined {
   return rule?.value;
 }
 
+function startingUrl(tool: PersonalToolRecord, currentUrl: URL): URL | undefined {
+  const startPath = recordedStartingPath(tool);
+  if (!startPath) return undefined;
+  const target = new URL(startPath, tool.scope.origin);
+  const currentVariant = currentUrl.searchParams.get('variant');
+  if (currentVariant) target.searchParams.set('variant', currentVariant);
+  else target.searchParams.delete('variant');
+  return target;
+}
+
 async function waitForPageBridge(tabId: number, expectedUrl: string): Promise<Browser.tabs.Tab> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -379,9 +389,9 @@ export default defineBackground(() => {
       throw new Error(`“${tool.title}” is available on ${tool.scope.origin}${startPath}. Open that page and try again.`);
     }
 
-    const startPath = recordedStartingPath(tool);
-    if (startPath && `${url.pathname}${url.search}` !== startPath) {
-      const targetUrl = `${tool.scope.origin}${startPath}`;
+    const target = startingUrl(tool, url);
+    if (target && `${url.pathname}${url.search}` !== `${target.pathname}${target.search}`) {
+      const targetUrl = target.href;
       if (!allowStartPageNavigation) {
         throw new Error(`“${tool.title}” starts on ${targetUrl}. Open that page before asking the agent to run it.`);
       }
@@ -822,8 +832,8 @@ export default defineBackground(() => {
       if (activeTab?.id !== undefined) {
         const idle = createIdleTeachSession();
         teachSessionByTab.set(activeTab.id, idle);
-        void browser.tabs.sendMessage(activeTab.id, { type: 'RESET_TEACHING' }).catch(() => undefined);
-        void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+        await browser.tabs.sendMessage(activeTab.id, { type: 'RESET_TEACHING' }).catch(() => undefined);
+        await browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
       }
       void browser.runtime.sendMessage({ type: 'PERSONAL_TOOLS_CHANGED' }).catch(() => undefined);
       return { saved: true, toolId: message.tool.id, revisionId: revision.id };
@@ -836,7 +846,7 @@ export default defineBackground(() => {
       await toolRegistryRepository.remove(tool.id);
       const activeTab = await getActiveTab();
       if (activeTab?.id !== undefined) {
-        void browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+        await browser.tabs.sendMessage(activeTab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
       }
       void browser.runtime.sendMessage({ type: 'PERSONAL_TOOLS_CHANGED' }).catch(() => undefined);
       return { deleted: true, toolId: tool.id };

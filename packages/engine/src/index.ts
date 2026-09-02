@@ -6,3 +6,4 @@ export type {
 } from '@personal-webmcp/contracts';
 
 export * from './compiler';
+export * from './intent';

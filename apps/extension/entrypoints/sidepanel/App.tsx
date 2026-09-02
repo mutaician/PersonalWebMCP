@@ -109,10 +109,12 @@ function SchemaField({
       {schema.type === 'boolean' ? (
         <input className="runner-checkbox" type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} disabled={disabled} />
       ) : enumValues.length > 0 ? (
-        <select value={String(value ?? '')} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
-          <option value="">Select {name.replaceAll('_', ' ')}</option>
-          {enumValues.map((option) => <option value={String(option)} key={String(option)}>{String(option)}</option>)}
-        </select>
+        <span className="enum-choices" role="radiogroup" aria-label={`Choose ${name.replaceAll('_', ' ')}`}>
+          {enumValues.map((option) => {
+            const optionValue = String(option);
+            return <button className={String(value ?? '') === optionValue ? 'active' : ''} type="button" role="radio" aria-checked={String(value ?? '') === optionValue} onClick={() => onChange(optionValue)} disabled={disabled} key={optionValue}>{optionValue}</button>;
+          })}
+        </span>
       ) : schema.type === 'array' && arrayEnum.length > 0 ? (
         <span className="enum-checks">{arrayEnum.map((option) => <span key={option}><input type="checkbox" checked={selectedArray.has(option)} onChange={(event) => { const next = new Set(selectedArray); if (event.target.checked) next.add(option); else next.delete(option); onChange([...next].join(',')); }} disabled={disabled} />{option}</span>)}</span>
       ) : (
@@ -346,13 +348,17 @@ export default function App() {
 
   useEffect(() => {
     void refresh();
-    const intervalId = window.setInterval(() => void refresh(), 1500);
+    void browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+      if (tab?.id === undefined) return;
+      await browser.tabs.sendMessage(tab.id, { type: 'SYNC_PERSONAL_TOOLS' }).catch(() => undefined);
+      await browser.tabs.sendMessage(tab.id, { type: 'REFRESH_CATALOG' }).catch(() => undefined);
+      window.setTimeout(() => void refresh(), 180);
+    });
     const onMessage = (message: { type?: string }) => {
       if (['WEBMCP_STATUS', 'WEBMCP_CATALOG', 'TEACH_STATE_CHANGED', 'TOOL_EXECUTION_CHANGED', 'PERSONAL_TOOLS_CHANGED', 'REPAIR_STATE_CHANGED'].includes(message.type ?? '')) void refresh();
     };
     browser.runtime.onMessage.addListener(onMessage);
     return () => {
-      window.clearInterval(intervalId);
       browser.runtime.onMessage.removeListener(onMessage);
     };
   }, [refresh]);
@@ -668,6 +674,10 @@ export default function App() {
           <div className="section-heading">
             <div><p className="overline">SEMANTIC REPAIR</p><h2>Review and recover</h2></div>
           </div>
+          <div className="repair-guide">
+            <strong>Repair starts when a saved tool encounters a changed page.</strong>
+            <ol><li>Run a tool that previously worked.</li><li>If its semantic target moved, PersonalWebMCP either verifies the new target automatically or stops here.</li><li>Approve a suggested target—or select it directly on the visible page—then run again.</li></ol>
+          </div>
           {snapshot.repairs.length > 0 ? snapshot.repairs.map((proposal) => (
             <RepairProposalCard
               proposal={proposal}
@@ -676,7 +686,7 @@ export default function App() {
               onGuide={startGuidedRepair}
               key={proposal.id}
             />
-          )) : <p className="empty-copy">No repair decisions are waiting. Failed targets appear here instead of being guessed.</p>}
+          )) : <p className="empty-copy">Nothing needs your decision. This is expected until a saved tool encounters a changed target.</p>}
 
           <div className="section-heading divided"><div><p className="overline">HEALTH</p><h2>Saved capabilities</h2></div></div>
           {personalTools.map((tool) => (

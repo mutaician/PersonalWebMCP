@@ -71,12 +71,14 @@ export default defineContentScript({
     };
     let currentUrl = window.location.href;
     let personalSyncTimer: number | undefined;
+    let personalSyncSequence: Promise<void> = Promise.resolve();
     const activeExecutions = new Map<string, AbortController>();
     const pendingNativeExecutions = new Map<string, {
       resolve: (result: JsonValue) => void;
       reject: (error: Error) => void;
       timeoutId: number;
     }>();
+    const pendingPersonalSyncs = new Map<string, { resolve: () => void; reject: (error: Error) => void; timeoutId: number }>();
     const pendingHumanConfirmations = new Map<string, {
       resolve: () => void;
       reject: (error: Error) => void;
@@ -123,13 +125,27 @@ export default defineContentScript({
       await browser.runtime.sendMessage({ type: 'WEBMCP_STATUS', payload: currentStatus });
     };
 
-    const syncPersonalTools = async () => {
+    const performPersonalToolsSync = async () => {
       const tools = await browser.runtime.sendMessage({
         type: 'GET_SCOPED_PERSONAL_TOOLS',
         url: window.location.href,
         supported: currentStatus.supported,
       }) as PersonalToolRegistration[];
-      postCommand('SYNC_PERSONAL_TOOLS', { tools: Array.isArray(tools) ? tools : [] });
+      const syncId = crypto.randomUUID();
+      await new Promise<void>((resolve, reject) => {
+        const timeoutId = window.setTimeout(() => {
+          pendingPersonalSyncs.delete(syncId);
+          reject(new Error('WebMCP tool registration did not finish in time.'));
+        }, 4_000);
+        pendingPersonalSyncs.set(syncId, { resolve, reject, timeoutId });
+        postCommand('SYNC_PERSONAL_TOOLS', { tools: Array.isArray(tools) ? tools : [], syncId });
+      });
+    };
+
+    const syncPersonalTools = () => {
+      const next = personalSyncSequence.catch(() => undefined).then(performPersonalToolsSync);
+      personalSyncSequence = next;
+      return next;
     };
 
     const schedulePersonalToolsSync = (delay = 120) => {
@@ -172,6 +188,16 @@ export default defineContentScript({
             },
           }),
         ]);
+      }
+
+      if (event.data.type === 'PERSONAL_TOOLS_SYNCED') {
+        const payload = event.data.payload as { syncId?: string };
+        const pending = payload.syncId ? pendingPersonalSyncs.get(payload.syncId) : undefined;
+        if (pending && payload.syncId) {
+          window.clearTimeout(pending.timeoutId);
+          pendingPersonalSyncs.delete(payload.syncId);
+          pending.resolve();
+        }
       }
 
       if (event.data.type === 'PERSONAL_TOOL_INVOCATION') {
@@ -417,9 +443,13 @@ export default defineContentScript({
       pendingNativeExecutions.clear();
       for (const pending of pendingHumanConfirmations.values()) pending.reject(new Error('The page closed while confirmation was pending.'));
       pendingHumanConfirmations.clear();
+      for (const pending of pendingPersonalSyncs.values()) {
+        window.clearTimeout(pending.timeoutId);
+        pending.reject(new Error('The page closed while tools were being registered.'));
+      }
+      pendingPersonalSyncs.clear();
       stopGuidedSelection();
       recorder.dispose();
-      postCommand('WITHDRAW_PING');
     }, { once: true });
   },
 });

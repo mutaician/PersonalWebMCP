@@ -60,9 +60,18 @@ export default function LegacyPortalPage() {
   const [systemMessage, setSystemMessage] = useState('Ready');
 
   useEffect(() => {
-    const requestedVariant = new URLSearchParams(window.location.search).get('variant');
-    if (requestedVariant === 'redesigned') setVariant('redesigned');
-    if (requestedVariant === 'redesigned' || requestedVariant === 'classic') setActiveModule('invoices');
+    const syncFromLocation = () => {
+      const search = new URLSearchParams(window.location.search);
+      const requestedVariant = search.get('variant');
+      const requestedModule = search.get('module');
+      setVariant(requestedVariant === 'redesigned' ? 'redesigned' : 'classic');
+      if (modules.some((module) => module.id === requestedModule)) setActiveModule(requestedModule as LegacyModule);
+      else if (requestedVariant === 'redesigned' || requestedVariant === 'classic') setActiveModule('invoices');
+      else setActiveModule('dashboard');
+    };
+    syncFromLocation();
+    window.addEventListener('popstate', syncFromLocation);
+    return () => window.removeEventListener('popstate', syncFromLocation);
   }, []);
 
   const vendors = useMemo(() => [...new Set(demoInvoices.map((invoice) => invoice.vendor))].sort(), []);
@@ -94,7 +103,18 @@ export default function LegacyPortalPage() {
 
   const openModule = (module: LegacyModule) => {
     setActiveModule(module);
+    const url = new URL(window.location.href);
+    url.searchParams.set('module', module);
+    window.history.pushState(null, '', `${url.pathname}${url.search}`);
     setSystemMessage((modules.find((item) => item.id === module)?.label ?? module) + ' loaded');
+  };
+
+  const changeVariant = (nextVariant: PortalVariant) => {
+    setVariant(nextVariant);
+    const url = new URL(window.location.href);
+    url.searchParams.set('module', activeModule);
+    url.searchParams.set('variant', nextVariant);
+    window.history.pushState(null, '', `${url.pathname}${url.search}`);
   };
 
   const reset = () => {
@@ -111,6 +131,7 @@ export default function LegacyPortalPage() {
     setTicketSubject('');
     setAccountName('Maya Mugo');
     setSystemMessage('Application state reset');
+    window.history.replaceState(null, '', '/legacy');
     resetDemoDeveloperState();
   };
 
@@ -145,7 +166,7 @@ export default function LegacyPortalPage() {
         <header className="atlas-topbar">
           <a className="atlas-brand" href="/"><span>A</span><div><strong>Atlas</strong><small>Supplier workspace</small></div></a>
           <label className="atlas-global-search"><span>Search workspace</span><input id="redesigned-global-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Invoices, suppliers, documents…" /></label>
-          <div className="atlas-top-actions"><button type="button" onClick={() => setVariant('classic')}>Use classic console</button><span className="atlas-avatar">MM</span></div>
+          <div className="atlas-top-actions"><button type="button" onClick={() => changeVariant('classic')}>Use classic console</button><span className="atlas-avatar">MM</span></div>
         </header>
 
         <div className="atlas-frame">
@@ -259,7 +280,7 @@ export default function LegacyPortalPage() {
         <i />
         <label>Quick Find:<input value={query} onChange={(event) => setQuery(event.target.value)} /></label>
         <button type="button" onClick={reset}><span>↺</span>Reset</button>
-        <button type="button" onClick={() => setVariant('redesigned')}><span>↗</span>New Portal</button>
+        <button type="button" onClick={() => changeVariant('redesigned')}><span>↗</span>New Portal</button>
       </div>
 
       <div className="legacy-shell">

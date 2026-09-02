@@ -280,8 +280,12 @@ export default defineUnlistedScript(() => {
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'RUN_PING_SELF_TEST') {
       void runSelfTest();
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'SYNC_PERSONAL_TOOLS') {
-      const payload = event.data.payload as { tools?: PersonalToolRegistration[] };
-      void syncPersonalTools(Array.isArray(payload.tools) ? payload.tools : []);
+      const payload = event.data.payload as { tools?: PersonalToolRegistration[]; syncId?: string };
+      void (async () => {
+        await syncPersonalTools(Array.isArray(payload.tools) ? payload.tools : []);
+        await publishCatalog();
+        postEvent('PERSONAL_TOOLS_SYNCED', { syncId: payload.syncId });
+      })();
     } else if (event.data.tabSessionId === tabSessionId && event.data.type === 'PERSONAL_TOOL_RESULT') {
       const payload = event.data.payload as PersonalToolInvocationResultPayload;
       const pending = pendingInvocations.get(payload.invocationId);
@@ -310,21 +314,26 @@ export default defineUnlistedScript(() => {
     }
   };
 
-  const dispose = () => {
+  const cleanup = (unregisterTools: boolean) => {
     window.removeEventListener('message', onMessage);
     if (catalogTimer !== undefined) window.clearTimeout(catalogTimer);
     catalogTimer = undefined;
     stopWatchingTools();
-    registrationController?.abort();
+    if (unregisterTools) registrationController?.abort();
     registrationController = undefined;
-    for (const registration of personalRegistrations.values()) registration.controller.abort();
+    if (unregisterTools) {
+      for (const registration of personalRegistrations.values()) registration.controller.abort();
+    }
     personalRegistrations.clear();
     for (const invocationId of pendingInvocations.keys()) {
       rejectPendingInvocation(invocationId, new Error('The page was closed before execution completed.'));
     }
   };
 
+  const dispose = () => cleanup(true);
+  const disposeForPageHide = () => cleanup(false);
+
   window.addEventListener('message', onMessage);
-  window.addEventListener('pagehide', dispose, { once: true });
+  window.addEventListener('pagehide', disposeForPageHide, { once: true });
   window.__personalWebMcpPageState = { dispose };
 });

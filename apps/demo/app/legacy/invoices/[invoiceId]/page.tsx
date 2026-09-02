@@ -62,7 +62,7 @@ export default async function InvoiceDetailPage({ params, searchParams }: Invoic
   }
 
   const lines = getInvoiceLines(invoice.vendor, invoice.amount);
-  const backHref = `/legacy?variant=${redesigned ? 'redesigned' : 'classic'}`;
+  const backHref = `/legacy?module=invoices&variant=${redesigned ? 'redesigned' : 'classic'}`;
 
   if (redesigned) {
     return (

@@ -23,6 +23,15 @@ function normalizeText(value: string | null | undefined, limit = 160): string | 
   return normalized ? normalized.slice(0, limit) : undefined;
 }
 
+function liveRegionTexts(): Set<string> {
+  return new Set(
+    [...document.querySelectorAll('[role="status"], [role="alert"], [aria-live]')]
+      .filter((element) => !element.closest('[data-personal-webmcp-overlay]'))
+      .map((element) => normalizeText(element.textContent, 220))
+      .filter((value): value is string => Boolean(value)),
+  );
+}
+
 function associatedLabel(element: Element): string | undefined {
   if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
     const explicit = element.labels?.[0];
@@ -373,12 +382,31 @@ export class InteractionRecorder {
     if (eventTarget.closest('input, select, textarea, label')) return;
     const element = eventTarget.closest(ACTIONABLE_SELECTOR);
     if (!element) return;
+    const stepId = crypto.randomUUID();
+    const statusBeforeActivation = liveRegionTexts();
     this.appendStep({
-      id: crypto.randomUUID(),
+      id: stepId,
       type: 'ACTIVATE',
       occurredAt: new Date().toISOString(),
       locator: createSemanticLocator(element, 'ACTIVATE'),
     }, element);
+    window.setTimeout(() => this.captureVisibleOutcome(stepId, statusBeforeActivation), 240);
+  }
+
+  private captureVisibleOutcome(stepId: string, previousTexts: Set<string>): void {
+    if (!this.state.trace) return;
+    const appeared = [...liveRegionTexts()].find((text) => !previousTexts.has(text));
+    if (!appeared) return;
+    const index = this.state.trace.steps.findIndex((step) => step.id === stepId);
+    const current = this.state.trace.steps[index];
+    if (index < 0 || !current?.locator) return;
+    const steps = [...this.state.trace.steps];
+    steps[index] = {
+      ...current,
+      locator: { ...current.locator, expectedOutcome: `text-appears:${appeared}` },
+    };
+    this.state = { ...this.state, trace: { ...this.state.trace, steps } };
+    this.publish();
   }
 
   private captureSubmit(event: Event): void {
