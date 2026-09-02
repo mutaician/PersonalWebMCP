@@ -1,65 +1,61 @@
 # PersonalWebMCP
 
-**Define your own capabilities for the web.**
+**A Chromium extension that lets users create their own WebMCP tools on the websites they use.**
 
-[Live demo](https://personal-webmcp.mutaician.chatgpt.site) · [Manual verification](docs/MANUAL_TESTS.md) · [MIT license](LICENSE)
+[Companion demo](https://personal-webmcp.mutaician.chatgpt.site) · [Manual verification](docs/MANUAL_TESTS.md) · [MIT license](LICENSE)
 
-![PersonalWebMCP landing page](docs/assets/landing-page.png)
+<img src="docs/assets/extension-side-panel.png" alt="PersonalWebMCP side panel showing a user-created invoice capability registered on the visible page" width="480">
 
-WebMCP lets websites define typed capabilities for agents. PersonalWebMCP adds the user-owned layer: teach a missing workflow once, decide what remains a preference and what an agent may supply, compose it with tools the website already exposes, and keep the capability useful as the interface evolves.
+WebMCP lets websites define capabilities for agents. PersonalWebMCP adds the user-owned layer: teach a missing workflow once, turn it into a reusable WebMCP tool, combine it with tools the website already exposes, and keep it useful as the interface evolves.
 
-PersonalWebMCP is a Chromium extension paired with a public WebMCP demo site. The extension can be enabled one origin at a time, so the same user-owned capability model is not limited to the included demos.
+The **extension is the product**. The included websites are controlled companion demos for proving the extension against three different conditions: a legacy site with no tools, a modern site with native tools but a missing action, and a hybrid travel workflow.
 
-## What PersonalWebMCP does
+## What the extension adds to WebMCP
 
-- **Teach:** record a visible browser workflow and compile its intent into a named, typed WebMCP tool.
-- **Personalize:** remember fixed preferences while turning selected values into JSON Schema inputs for the agent.
-- **Compose:** combine website-owned WebMCP tools, other personal tools, and taught missing actions into a higher-level capability.
-- **Repair:** match changed controls using semantic evidence, verify the visible outcome, and retain versioned repair history.
-- **Keep control:** store definitions locally, scope tools by origin and path, redact sensitive inputs, and pause consequential workflows for human confirmation.
+After the user enables a website, PersonalWebMCP registers extension-owned capabilities into that page's `document.modelContext`. An agent sees them in the same tool catalog as website-owned tools.
 
-The result is not a prompt library. Personal capabilities are registered with `document.modelContext`, discovered alongside website-owned tools, and invoked through WebMCP.
+| Tool type | What the agent receives |
+| --- | --- |
+| `personal_ping` | A built-in extension tool that verifies registration and execution on the visible page |
+| Taught `personal_*` tool | A missing browser workflow compiled into a named tool with JSON Schema inputs |
+| Composite `personal_*` tool | One higher-level capability that can call native site tools and taught personal actions |
+| Repaired personal tool | The same public contract, updated to match an evolved interface |
 
-## How WebMCP is used
+Except for `personal_ping`, the extension intentionally does not ship a fixed catalog of business actions. Its purpose is to **make tools**: each saved personal capability is dynamically registered through WebMCP and can be invoked by a compatible agent.
 
-PersonalWebMCP exercises the WebMCP lifecycle in three ways.
+For example, a user can:
 
-### 1. Websites register native tools
+1. Teach an invoice search to a portal that exposes no WebMCP tools.
+2. Choose `vendor` and `min_amount` as agent inputs while remembering status and sort preferences.
+3. Save `personal_open_latest_unpaid_invoice`.
+4. Ask an agent to open the newest unpaid Acme invoice above $5,000.
 
-The Forma and Wayfinder demos expose typed website-owned capabilities. A simplified example from the configurator is:
+On a site that already exposes tools, the user can instead adapt and extend them. The Forma demo exposes five configurator tools but no **Add to project** tool. PersonalWebMCP can teach that missing action and compose it with the five native tools as one personalized capability such as `personal_prepare_my_studio_workspace`.
 
-```ts
-const controller = new AbortController();
+## How it works
 
-await document.modelContext.registerTool({
-  name: 'configurator_set_quantity',
-  title: 'Set project quantity',
-  description: 'Changes the visible project quantity and total.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      quantity: { type: 'integer', minimum: 1, maximum: 8 },
-    },
-    required: ['quantity'],
-    additionalProperties: false,
-  },
-  annotations: {
-    readOnlyHint: false,
-    untrustedContentHint: false,
-  },
-  execute: async (input, options) => {
-    options?.signal?.throwIfAborted();
-    setQuantity(input.quantity);
-    return { ok: true, quantity: input.quantity };
-  },
-}, { signal: controller.signal });
+```text
+User demonstrates or composes a capability in the extension
+                              |
+                              v
+            PersonalWebMCP creates a typed contract
+                              |
+                              v
+ Extension MAIN-world bridge registers it on the visible page
+                              |
+                              v
+ document.modelContext lists native + personal tools together
+                              |
+                              v
+ Agent invokes the personal tool with structured JSON input
+                              |
+                              v
+ Extension executes, verifies, reports, and can repair the workflow
 ```
 
-See the complete native registrations in [the configurator hook](apps/demo/app/configurator/use-configurator-webmcp.ts) and [travel hook](apps/demo/app/travel/use-travel-webmcp.ts).
+WebMCP is page-scoped: `document.modelContext` belongs to the visible webpage, not to an extension service worker. PersonalWebMCP therefore injects a small MAIN-world bridge into each user-enabled page. The side panel, isolated content script, service worker, and page bridge communicate without replacing the standard WebMCP tool surface.
 
-### 2. The extension registers personal tools
-
-The extension injects a small MAIN-world bridge because `document.modelContext` belongs to the page context. Compiled personal contracts are passed to that bridge and registered dynamically:
+The extension's registration helper uses the real API:
 
 ```ts
 await modelContext.registerTool({
@@ -70,88 +66,35 @@ await modelContext.registerTool({
   annotations: registration.annotations,
   execute: async (input, options) => {
     options?.signal?.throwIfAborted();
-    return executePersonalCapability(input, options?.signal);
+    return agentSafeResult(
+      await execute(normalizeInvocationInput(input), options?.signal),
+    );
   },
 }, { signal });
 ```
 
-The real implementation is in [packages/webmcp](packages/webmcp/src/index.ts) and the [MAIN-world runtime](apps/extension/entrypoints/webmcp-main.ts). Abort signals control registration lifetime and invocation cancellation.
+It also discovers native tools with `document.modelContext.getTools()` and invokes composite dependencies through `document.modelContext.executeTool()`. See [the WebMCP helpers](packages/webmcp/src/index.ts) and [page runtime](apps/extension/entrypoints/webmcp-main.ts).
 
-### 3. Personal composites invoke native tools
+## Extension capabilities
 
-The extension discovers tools with `document.modelContext.getTools()` and invokes dependencies with `document.modelContext.executeTool()`. A composite therefore remains a WebMCP tool itself while orchestrating capabilities already provided by the visible site.
-
-For example, `personal_prepare_my_studio_workspace` can remember a product, size, finish and options, expose only `quantity` to the agent, invoke five native configurator tools, then call a user-taught **Add to project** capability.
-
-## Tool model
-
-| Tool kind | Created by | Purpose |
-| --- | --- | --- |
-| Native | Website | Fine-grained capabilities registered directly by the current page |
-| Taught | User | A missing visible workflow compiled into a typed personal tool |
-| Composite | User | A higher-level capability built from native and/or personal tools |
-| System | Extension | Connection and runtime checks such as `personal_ping` |
-
-Every saved personal tool carries:
-
-- a WebMCP-safe name, title and description;
-- a JSON Schema input contract;
-- origin, path and prerequisite scope;
-- read-only/untrusted-content annotations and a risk class;
-- an executable workflow graph;
-- provenance, health, versions and repair history.
-
-## Controlled demos
-
-The public site uses fictional deterministic data and reset controls.
-
-### Atlas Supplier Portal — teach
-
-A deliberately old interface with no native tools. Teach the invoice search once, expose `vendor` and `min_amount` as inputs, and let an agent invoke `personal_open_latest_unpaid_invoice` from another portal section.
-
-### Forma Configurator — personalize and compose
-
-A modern site with five native WebMCP tools. Adapt them into a preferred workspace, teach the missing **Add to project** action, and combine both into one personal capability.
-
-### Wayfinder Travel — hybrid and review
-
-Native trip search/detail tools can be combined with a learned personal preference and an explicit human checkpoint before a consequential action continues.
-
-## Architecture
-
-```text
-WebMCP agent / Model Context Tool Inspector
-                    |
-                    v
-           document.modelContext
-            /              \
- website-owned tools   page MAIN-world bridge
-                              |
-                    isolated content script
-                              |
-                    extension service worker
-                   /          |           \
-          local storage   intent compiler   executor + repair
-                              |
-                          side panel
-                teach · compose · run · review
-```
-
-- The **side panel** is the user interface for permissions, teaching, contracts, composition, execution and repair.
-- The **content script** records permitted visible interactions and carries messages across the isolated-world boundary.
-- The **service worker** owns persistence, scope, orchestration, receipts and confirmation state.
-- The **MAIN-world bridge** is the only extension component that touches the page's WebMCP API.
-- The **compiler** normalizes raw interactions into task-level workflow nodes and generates the schema and executable graph together.
+- **Enable per origin:** the user explicitly grants access to each HTTP(S) site.
+- **Inspect and run:** list the visible page's native and personal tools with schema-driven inputs.
+- **Teach:** record a permitted visible workflow, then decide which values stay fixed and which become agent inputs.
+- **Compile:** create the tool name, description, JSON Schema, executable workflow graph, scope, risk and provenance together.
+- **Compose:** combine native site tools and personal tools into one higher-level WebMCP capability.
+- **Execute visibly:** restore the tool's starting context, act on the current page and return an agent-readable result.
+- **Repair:** use semantic evidence to adapt changed targets, with approval when the replacement is ambiguous.
+- **Keep control:** store definitions locally, redact sensitive controls and require confirmation for consequential workflows.
 
 ## Install the extension
 
-### Requirements
+Requirements:
 
 - Node.js 24 or newer
 - pnpm 11 or newer
-- Google Chrome 149 or later with WebMCP testing enabled
+- a WebMCP-capable Chrome/Chromium build with WebMCP testing enabled
 
-### Build and load
+Build it:
 
 ```bash
 git clone https://github.com/mutaician/PersonalWebMCP.git
@@ -160,43 +103,62 @@ pnpm install
 pnpm build
 ```
 
-1. Open `chrome://flags/#enable-webmcp-testing`.
-2. Enable WebMCP testing and restart Chrome completely.
-3. Open `chrome://extensions` and enable **Developer mode**.
-4. Select **Load unpacked**.
-5. Choose `apps/extension/.output/chrome-mv3`.
-6. Open the [live demo](https://personal-webmcp.mutaician.chatgpt.site).
-7. Open PersonalWebMCP and grant access to the displayed origin.
-8. Run **Connection check**. The result appears directly in the side panel.
+Load it in Chrome:
 
-Site access is optional and origin-specific. The extension requests broader HTTP(S) access only when the user explicitly enables another site.
+1. Open `chrome://flags/#enable-webmcp-testing`, enable WebMCP testing, and restart Chrome.
+2. Open `chrome://extensions` and enable **Developer mode**.
+3. Select **Load unpacked** and choose `apps/extension/.output/chrome-mv3`.
+4. Open a website, open the PersonalWebMCP side panel, and grant access to the displayed origin.
+5. Select **Run connection check**. Success appears in the side panel and proves that the extension's `personal_ping` tool executed through WebMCP.
 
-## Test with an agent
+The extension follows the active browser tab. Each origin is detected and scoped independently; tools from one site are not offered as executable capabilities on an unrelated site.
 
-Install Chrome's [Model Context Tool Inspector](https://chromewebstore.google.com/detail/webmcp-model-context-tool/gbpdfapgefenggkahomfgkhfehlcenpd). Its agent mode can discover and invoke the same native and personal tools registered on the visible page.
+## Verify it with an agent
 
-A short evaluation path:
+Chrome's [Model Context Tool Inspector](https://chromewebstore.google.com/detail/webmcp-model-context-tool/gbpdfapgefenggkahomfgkhfehlcenpd) can discover and invoke the native and personal tools registered on the visible page. Its natural-language agent mode optionally uses a Gemini API key.
 
-1. Confirm `personal_ping` succeeds in the extension.
-2. Open `/configurator` and confirm five native `configurator_*` tools are discovered.
-3. Run one native tool and confirm the visible design changes.
-4. Open `/legacy`, teach the invoice workflow, and save it as a personal tool.
-5. Ask the Inspector agent: **“Open the newest unpaid invoice from Acme Industrial Supply above $5,000.”**
-6. Confirm it invokes the personal tool with structured arguments and opens `INV-2041`.
+Use the [live companion demo](https://personal-webmcp.mutaician.chatgpt.site) for two concise proof paths:
 
-The complete reproducible journeys, expected results, repair checks and clean-profile release test are in [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).
+- **Legacy portal:** teach `personal_open_latest_unpaid_invoice` where the website provides zero native tools, then have the agent invoke it with a different vendor and amount.
+- **Forma configurator:** inspect and run the five native `configurator_*` tools, teach the missing **Add to project** action, then compose both into one agent-callable personal tool.
 
-## Run locally
+The exact setup, inputs, expected visible outcomes, repair checks and clean-profile release check are in [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).
 
-Start both the demo and extension development builds:
+## Architecture
+
+```text
+WebMCP agent / Inspector
+          |
+ document.modelContext  <----- website-owned native tools
+          |
+ extension MAIN-world bridge
+          |
+ isolated content script
+          |
+ service worker -------- local extension storage
+          |
+ compiler + executor + semantic repair
+          |
+ side panel: inspect · teach · compose · run · repair
+```
+
+- [apps/extension](apps/extension) — the PersonalWebMCP product: Manifest V3 runtime and side panel.
+- [packages/webmcp](packages/webmcp) — WebMCP registration, discovery and invocation helpers.
+- [packages/engine](packages/engine) — intent compiler and workflow graph primitives.
+- [packages/contracts](packages/contracts) — typed tool records and bridge messages.
+- [apps/demo](apps/demo) — public companion fixtures used to demonstrate and evaluate the extension.
+
+## Develop locally
+
+Run the demo and extension development builds:
 
 ```bash
 pnpm dev
 ```
 
-The demo is served at `http://localhost:3000`. Load the development extension from `apps/extension/.output/chrome-mv3`.
+The demo runs at `http://localhost:3000`; load `apps/extension/.output/chrome-mv3` as the unpacked extension. After extension code changes, reload the extension and the tested page.
 
-Minimal release checks:
+Minimal project checks:
 
 ```bash
 pnpm typecheck
@@ -204,33 +166,11 @@ pnpm build
 pnpm zip:extension
 ```
 
-The packaged Chromium extension is written to `apps/extension/.output/`.
-
-## Repository map
-
-```text
-apps/demo                 public landing page and controlled WebMCP demos
-apps/extension            WXT Manifest V3 extension and side panel
-packages/contracts        typed bridge messages, tool records and schemas
-packages/engine           intent compiler and workflow graph primitives
-packages/webmcp           WebMCP discovery, registration and invocation helpers
-docs/MANUAL_TESTS.md      public browser and agent verification guide
-```
-
-All functionality required for the demo is contained in this repository. No private backend, login, paid API or hidden dataset is required. A Gemini API key is optional only when using the third-party Inspector's natural-language agent mode.
-
-## Trust boundaries
-
-- Personal capabilities and receipts are stored locally in extension storage.
-- Registration is filtered by origin, path, health and native prerequisites.
-- Password, OTP, card, token and secret-like controls are excluded from durable recordings.
-- Invalid schemas and missing targets stop before execution.
-- Ambiguous repairs require approval or guided selection.
-- Consequential composites can require an explicit human decision.
+The packaged Chromium extension is written to `apps/extension/.output/`. No private backend, login, paid API or hidden dataset is required.
 
 ## Current scope
 
-This submission targets WebMCP-enabled Chrome. Because personal capabilities are registered through the standard page API, the longer-term direction is to surface the same user-owned tool contracts to other WebMCP-compatible agents, including desktop agent clients.
+This version targets WebMCP-enabled Chromium and executes against the visible, user-enabled page. Personal capabilities, receipts and repair history remain in extension storage. The longer-term direction is to make the same user-owned capability contracts available to other WebMCP-compatible agents without tying them to one agent provider.
 
 ## License
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ActiveTabSnapshot,
   DiscoveredWebMcpTool,
@@ -326,6 +326,7 @@ export default function App() {
   const [actionError, setActionError] = useState('');
   const [toast, setToast] = useState<{ tone: 'success' | 'error' | 'info'; message: string }>();
   const [seenConnectionCheckAt, setSeenConnectionCheckAt] = useState(0);
+  const refreshSequence = useRef(0);
 
   const pushToast = useCallback((tone: 'success' | 'error' | 'info', message: string) => {
     setToast({ tone, message });
@@ -338,10 +339,14 @@ export default function App() {
   }, [toast]);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const next = await browser.runtime.sendMessage({ type: 'GET_PANEL_SNAPSHOT' }) as ActiveTabSnapshot;
+      if (sequence !== refreshSequence.current) return;
       setSnapshot(next ?? emptySnapshot);
+      setActionError('');
     } catch (error) {
+      if (sequence !== refreshSequence.current) return;
       setActionError(error instanceof Error ? error.message : 'Could not read the active tab.');
     }
   }, []);
@@ -357,9 +362,17 @@ export default function App() {
     const onMessage = (message: { type?: string }) => {
       if (['WEBMCP_STATUS', 'WEBMCP_CATALOG', 'TEACH_STATE_CHANGED', 'TOOL_EXECUTION_CHANGED', 'PERSONAL_TOOLS_CHANGED', 'REPAIR_STATE_CHANGED'].includes(message.type ?? '')) void refresh();
     };
+    const onTabActivated = () => {
+      refreshSequence.current += 1;
+      setSnapshot(emptySnapshot);
+      setActionError('');
+      void refresh();
+    };
     browser.runtime.onMessage.addListener(onMessage);
+    browser.tabs.onActivated.addListener(onTabActivated);
     return () => {
       browser.runtime.onMessage.removeListener(onMessage);
+      browser.tabs.onActivated.removeListener(onTabActivated);
     };
   }, [refresh]);
 
