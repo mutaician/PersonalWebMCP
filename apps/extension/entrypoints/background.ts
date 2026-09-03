@@ -284,7 +284,7 @@ export default defineBackground(() => {
       ? await getLiveTabData(tab)
       : { status: emptyStatus(), catalog: emptyCatalog() };
     const url = getUrl(status.url || tab?.url);
-    const origin = url?.origin;
+    const origin = url && ['http:', 'https:'].includes(url.protocol) ? url.origin : undefined;
     const pattern = origin ? getOriginPattern(origin) : undefined;
     const [personalTools, receipts, repairs, enabled] = await Promise.all([
       toolRegistryRepository.list(),

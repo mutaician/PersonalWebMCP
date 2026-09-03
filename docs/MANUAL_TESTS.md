@@ -11,7 +11,9 @@ You need:
 - the [live demo](https://personal-webmcp.mutaician.chatgpt.site) or `http://localhost:3000`;
 - optionally, Chrome's [Model Context Tool Inspector](https://chromewebstore.google.com/detail/webmcp-model-context-tool/gbpdfapgefenggkahomfgkhfehlcenpd) for natural-language agent calls.
 
-Build the project before a release check:
+For the quickest evaluation, [download the prebuilt v0.1.0 Chrome extension](https://github.com/mutaician/PersonalWebMCP/releases/download/v0.1.0/personal-webmcp-0.1.0-chrome.zip), extract it, then load the extracted folder containing `manifest.json` from `chrome://extensions` with Developer mode enabled. No login, package installation, API key, or build step is required.
+
+To verify from source instead:
 
 ```bash
 pnpm install

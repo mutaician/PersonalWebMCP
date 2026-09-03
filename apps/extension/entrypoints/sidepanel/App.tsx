@@ -49,6 +49,17 @@ const emptySnapshot: ActiveTabSnapshot = {
   enabled: false,
 };
 
+function originPermissionPattern(origin: string | undefined): string | undefined {
+  if (!origin) return undefined;
+  try {
+    const url = new URL(origin);
+    if (url.origin !== origin || !['http:', 'https:'].includes(url.protocol)) return undefined;
+    return `${origin}/*`;
+  } catch {
+    return undefined;
+  }
+}
+
 function propertiesFromSchema(schema: Record<string, unknown> | undefined): Record<string, Record<string, unknown>> {
   const properties = schema?.properties;
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return {};
@@ -362,17 +373,24 @@ export default function App() {
     const onMessage = (message: { type?: string }) => {
       if (['WEBMCP_STATUS', 'WEBMCP_CATALOG', 'TEACH_STATE_CHANGED', 'TOOL_EXECUTION_CHANGED', 'PERSONAL_TOOLS_CHANGED', 'REPAIR_STATE_CHANGED'].includes(message.type ?? '')) void refresh();
     };
-    const onTabActivated = () => {
+    const refreshActiveTab = () => {
       refreshSequence.current += 1;
       setSnapshot(emptySnapshot);
       setActionError('');
       void refresh();
     };
+    const onTabActivated = () => refreshActiveTab();
+    const onTabUpdated = (_tabId: number, changeInfo: Browser.tabs.OnUpdatedInfo, tab: Browser.tabs.Tab) => {
+      if (!tab.active || (!changeInfo.url && changeInfo.status !== 'loading' && changeInfo.status !== 'complete')) return;
+      refreshActiveTab();
+    };
     browser.runtime.onMessage.addListener(onMessage);
     browser.tabs.onActivated.addListener(onTabActivated);
+    browser.tabs.onUpdated.addListener(onTabUpdated);
     return () => {
       browser.runtime.onMessage.removeListener(onMessage);
       browser.tabs.onActivated.removeListener(onTabActivated);
+      browser.tabs.onUpdated.removeListener(onTabUpdated);
     };
   }, [refresh]);
 
@@ -492,17 +510,28 @@ export default function App() {
   };
 
   const enableOrigin = async () => {
-    if (!snapshot.origin) return;
+    const requestedOrigin = snapshot.origin;
+    const permissionPattern = originPermissionPattern(requestedOrigin);
+    if (!requestedOrigin || !permissionPattern) {
+      setActionError('Open an HTTP or HTTPS website before enabling PersonalWebMCP.');
+      return;
+    }
     setBusy(true);
     setActionError('');
     try {
-      const granted = await browser.permissions.request({ origins: [`${snapshot.origin}/*`] });
+      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+      const activeOrigin = activeTab?.url ? new URL(activeTab.url).origin : undefined;
+      if (activeOrigin !== requestedOrigin) {
+        await refresh();
+        throw new Error('The active page changed. Try enabling the site again.');
+      }
+      const granted = await browser.permissions.request({ origins: [permissionPattern] });
       if (!granted) {
         setActionError('Site access was not granted.');
         return;
       }
-      await browser.runtime.sendMessage({ type: 'ENABLE_ORIGIN', origin: snapshot.origin });
-      pushToast('success', `PersonalWebMCP is enabled for ${snapshot.origin}.`);
+      await browser.runtime.sendMessage({ type: 'ENABLE_ORIGIN', origin: requestedOrigin });
+      pushToast('success', `PersonalWebMCP is enabled for ${requestedOrigin}.`);
       window.setTimeout(() => void refresh(), 500);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not enable this site.');

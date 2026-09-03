@@ -2,7 +2,7 @@
 
 **A Chromium extension that lets users create their own WebMCP tools on the websites they use.**
 
-[Companion demo](https://personal-webmcp.mutaician.chatgpt.site) · [Manual verification](docs/MANUAL_TESTS.md) · [MIT license](LICENSE)
+[Download extension v0.1.0](https://github.com/mutaician/PersonalWebMCP/releases/download/v0.1.0/personal-webmcp-0.1.0-chrome.zip) · [Companion demo](https://personal-webmcp.mutaician.chatgpt.site) · [Manual verification](docs/MANUAL_TESTS.md) · [MIT license](LICENSE)
 
 <img src="docs/assets/extension-side-panel.png" alt="PersonalWebMCP side panel showing a user-created invoice capability registered on the visible page" width="480">
 
@@ -90,11 +90,22 @@ It also discovers native tools with `document.modelContext.getTools()` and invok
 
 Requirements:
 
-- Node.js 24 or newer
-- pnpm 11 or newer
 - a WebMCP-capable Chrome/Chromium build with WebMCP testing enabled
 
-Build it:
+### Prebuilt release
+
+1. [Download PersonalWebMCP v0.1.0](https://github.com/mutaician/PersonalWebMCP/releases/download/v0.1.0/personal-webmcp-0.1.0-chrome.zip) and extract it.
+2. Open `chrome://flags/#enable-webmcp-testing`, enable WebMCP testing, and restart Chrome completely.
+3. Open `chrome://extensions` and enable **Developer mode**.
+4. Select **Load unpacked** and choose the extracted folder containing `manifest.json`.
+5. Open the [companion demo](https://personal-webmcp.mutaician.chatgpt.site), open the PersonalWebMCP side panel, and grant access to the displayed origin.
+6. Select **Run connection check**. Success appears in the side panel and proves that the extension's `personal_ping` tool executed through WebMCP.
+
+No login, API key, package installation, or build step is required. Chrome may ask you to confirm Developer mode when the browser restarts; keep the extension enabled through the judging period.
+
+### Build from source
+
+Building locally requires Node.js 24 or newer and pnpm 11 or newer:
 
 ```bash
 git clone https://github.com/mutaician/PersonalWebMCP.git
@@ -103,13 +114,7 @@ pnpm install
 pnpm build
 ```
 
-Load it in Chrome:
-
-1. Open `chrome://flags/#enable-webmcp-testing`, enable WebMCP testing, and restart Chrome.
-2. Open `chrome://extensions` and enable **Developer mode**.
-3. Select **Load unpacked** and choose `apps/extension/.output/chrome-mv3`.
-4. Open a website, open the PersonalWebMCP side panel, and grant access to the displayed origin.
-5. Select **Run connection check**. Success appears in the side panel and proves that the extension's `personal_ping` tool executed through WebMCP.
+Select `apps/extension/.output/chrome-mv3` when loading the source build unpacked.
 
 The extension follows the active browser tab. Each origin is detected and scoped independently; tools from one site are not offered as executable capabilities on an unrelated site.
 
